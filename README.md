@@ -1,13 +1,15 @@
-# ALPHA Sentinel — AD / Network Attack Monitor
+# ALPHA Sentinel v2 — AD / Network Attack Monitor (background service + web dashboard)
 
 A standalone Windows security-monitoring tool from the **Alpha Cybersecurity**
-graduation project: it watches the Windows Security event log on a Domain
-Controller (or any domain-joined machine), detects Active Directory /
-network attack patterns — Kerberos attacks (Kerberoasting, AS-REP roasting),
-LDAP/SAMR enumeration, password spraying, privilege escalation, suspicious
-remote logons, service abuse, and log tampering — and alerts the IT admin
-with a desktop UI and (optionally) forwards every detection to the
-**ALPHA web platform** (a separate private repo: `Maty156/alpha`).
+graduation project — **Wazuh's agent + dashboard model as ONE zero-dependency
+script**: Sentinel runs silently in the BACKGROUND on a Domain Controller (or
+any domain-joined machine), polls the Windows Security event log, detects
+Active Directory / network attack patterns — Kerberos attacks (Kerberoasting,
+AS-REP roasting), LDAP/SAMR enumeration, password spraying, privilege
+escalation, suspicious remote logons, service abuse, and log tampering — and
+serves a **modern web dashboard** you open in any browser on the network.
+Optionally forwards every detection to the **ALPHA web platform** (a separate
+private repo: `Maty156/alpha`).
 
 > The web platform (marketing site, client portal, admin panel, assessments,
 > certificates) lives in its **own repo**. This repo is the Windows tooling
@@ -17,9 +19,47 @@ with a desktop UI and (optionally) forwards every detection to the
 
 | File | What it is |
 |---|---|
-| `AlphaSentinel.ps1` | **The main tool** — dark-theme WinForms console: severity dashboard, live alert table, detail pane with MITRE mapping + remediation guidance, toast notifications, alert acknowledgment (persisted), CSV export, optional web forwarding with real event IDs |
+| `AlphaSentinel.ps1` | **The main tool (v2)** — background monitor + embedded web dashboard (see below) |
+| `dashboard.html` / `dashboard.js` | The web UI, served by AlphaSentinel on port 8443 — must sit beside the script |
 | `collector.ps1` | Minimal headless collector — polls the Security log and forwards matches to the web platform, no UI |
-| `BlueTeamConsole.ps1` | First-generation console (kept for reference; superseded by AlphaSentinel) |
+| `BlueTeamConsole.ps1` | First-generation console (kept for reference; superseded by AlphaSentinel v2) |
+
+## v2 architecture (what changed from v1)
+
+v1 was a WinForms desktop console. v2 is **service-style + web UI** (like
+Wazuh: agent on the host, dashboard in the browser):
+
+- **Runs in the background** — no window needed; the monitor keeps running
+  while you use any browser on the network.
+- **Embedded web server** (`System.Net.HttpListener`, zero dependencies) —
+  serves the dashboard and a JSON API on `http://0.0.0.0:8443`.
+- **Single-threaded by design** — one loop drains web requests AND polls the
+  event log (PowerShell scriptblocks can't run on .NET ThreadPool threads
+  without a runspace; works on PS 5.1 / Server 2012).
+- **Alerts persist** — every alert + acknowledgment is written to
+  `sentinel-history.csv`, so state survives restarts and is shared across
+  every browser (no browser-side storage).
+- **`/api/self-test`** — fires 6 synthetic events through the REAL rule
+  engine (same code path as live polling), lands the resulting alerts in the
+  dashboard tagged `[SELF-TEST]`, and restores the live trackers afterward so
+  it's repeatable.
+- **Fails loudly** — if `dashboard.html`/`dashboard.js` is missing, the
+  server returns a clear 500 telling you to download the full release.
+
+## The web dashboard (modern UI)
+
+Wazuh-style dark UI matching the ALPHA platform's design language:
+
+- **Severity stat tiles** — Critical / High / Medium / Low / Open / Acknowledged
+- **Live search** — by title, rule, MITRE, account, host, description
+- **Filters** — severity buttons + status dropdown (Open / Acknowledged)
+- **Auto-refresh** — every 10 s (toggleable) + manual refresh button
+- **Alert table** — time, severity badge, alert, account, host, MITRE; click
+  a row for the detail pane
+- **Detail pane** — MITRE ATT&CK mapping, rule, event ID, host, account,
+  source IP, what happened, and remediation guidance per alert
+- **Acknowledge / Unacknowledge** — per-row, persisted server-side
+- **Export CSV** — full alert list with MITRE + ack state for the engagement report
 
 ## Detection coverage (8 rule families)
 
@@ -34,7 +74,7 @@ with a desktop UI and (optionally) forwards every detection to the
 | Service abuse | 4697/7045 | Medium/High | T1543.003 |
 | Log tampering (cleared) | 1102 | Critical | T1070.001 |
 
-## Run AlphaSentinel (as Administrator)
+## Run AlphaSentinel v2 (as Administrator)
 
 Enable the audit categories the rules read (once):
 
@@ -47,9 +87,24 @@ auditpol /set /subcategory:"SAM" /success:enable
 auditpol /set /subcategory:"Other Object Access Events" /success:enable
 ```
 
+Run in the BACKGROUND (recommended — console closes, monitor + web UI keep
+running):
+
+```powershell
+Start-Process powershell -ArgumentList '-ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -Background' -WindowStyle Hidden
+```
+
+Or run in the FOREGROUND (small console window with a startup banner):
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1
 ```
+
+Then open the dashboard: **http://localhost:8443** (or
+`http://<DC-IP>:8443` from any machine on the network).
+
+**Try it instantly:** open `http://localhost:8443/api/self-test` — five
+`[SELF-TEST]` alerts appear in the dashboard to demo every UI feature.
 
 Optional forwarding to the web platform (same value as `COLLECTOR_API_KEY`
 on the server):
@@ -60,11 +115,14 @@ powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 `
   -ForwardKey "COLLECTOR_API_KEY value"
 ```
 
-Optional tuning: `-PollSeconds 10` (default 15), `-HistoryFile` (default
-`sentinel-history.csv` next to the script — acknowledged state survives restarts).
+Optional tuning: `-Port 8443`, `-PollSeconds 15`, `-HistoryFile`
+(default `sentinel-history.csv` next to the script).
 
-Works on Windows Server 2012 R2+ and Windows 10/11 (default .NET Framework 4.5+
-covers everything the script uses; no installs, no dependencies).
+Works on Windows Server 2012 R2+ and Windows 10/11 (default .NET Framework
+4.5+ covers everything the script uses; no installs, no dependencies).
+
+**Stop the background monitor:** from any PowerShell console, run
+`Stop-Sentinel` (registered globally by the script).
 
 ## Run the headless collector (no UI)
 
@@ -79,10 +137,12 @@ See the comments at the top of `collector.ps1` for details.
 ## How it fits the purple-team workflow
 
 1. Red team runs the attack chain in the lab (separate repo/environment).
-2. **Alpha Sentinel** detects the attack patterns live on the DC and alerts the admin.
-3. With forwarding enabled, the same alerts appear in the web platform's
-   admin **Detections tab**, where they're investigated and can be promoted
-   into a specific client's assessment findings.
+2. **Alpha Sentinel v2** detects the attack patterns live on the DC; the
+   admin monitors from the browser dashboard (or gets platform alerts with
+   forwarding enabled).
+3. The same alerts appear in the web platform's admin **Detections tab**,
+   where they're investigated and can be promoted into a specific client's
+   assessment findings.
 
 ---
 

@@ -1,27 +1,27 @@
 # ============================================================================
-# ALPHA SENTINEL — AD / Network Attack Monitor
+# ALPHA SENTINEL v2 — AD / Network Attack Monitor (background service + web UI)
 # ============================================================================
-# A standalone Windows desktop monitoring tool (WinForms, .NET — no installs,
-# no dependencies). Ships with ALPHA Cybersecurity's graduation project.
+# A standalone Windows security monitor from the ALPHA Cybersecurity project.
+# Like Wazuh's agent+dashboard model, but as ONE script with zero dependencies:
 #
-# WHAT IT DOES
-#   Polls the Windows Security event log on a Domain Controller (or any
-#   domain-joined machine), runs a rule engine covering the attack classes the
-#   red-team chain demonstrates — Kerberos attacks (Kerberoasting, AS-REP),
-#   LDAP recon (enumeration via SAMR), password spraying, privilege escalation,
-#   suspicious remote logons, service abuse, and log tampering — and surfaces
-#   everything in a live dark-theme console: severity dashboard, alert table,
-#   full alert detail with MITRE mapping and remediation guidance, desktop
-#   toast notifications for Critical/High alerts, alert acknowledgment, and a
-#   CSV export for the engagement report.
+#   - Runs in the BACKGROUND (service-style, no window needed): polls the
+#     Windows Security event log every -PollSeconds, runs 8 AD/network
+#     detection rule families (Kerberoasting, AS-REP roasting, LDAP/SAMR
+#     enumeration, password spraying, privilege escalation, suspicious remote
+#     logons, service abuse, log tampering), and keeps alerts in memory +
+#     a history CSV so acks survive restarts.
+#   - Serves a MODERN WEB DASHBOARD on http://0.0.0.0:<Port> (default 8443):
+#     open it from any browser on the network — Wazuh-style dark UI with
+#     severity stat tiles, live search, severity/status filters, auto-refresh,
+#     per-alert detail with MITRE ATT&CK mapping and remediation guidance,
+#     acknowledge/unacknowledge, a /api/self-test endpoint, and CSV export.
+#   - Optionally forwards every detection to the ALPHA web platform
+#     (separate private repo: Maty156/alpha) so the same alert appears in
+#     its admin Detections tab. Forwarding is optional; without it Sentinel
+#     works fully standalone.
 #
-#   It can ALSO optionally forward every detection to the ALPHA web platform
-#   (so the same alert appears in the admin panel's Detections tab and can be
-#   promoted into a client's findings) — but forwarding is optional; with it
-#   off, Sentinel works fully standalone with zero website dependency.
-#
-# SETUP (run once, as Administrator, before first use — enables the audit
-# categories the rules read):
+# QUICK START (as Administrator — reading the Security log requires elevation):
+#   # enable audit categories once:
 #   auditpol /set /subcategory:"Logon" /success:enable /failure:enable
 #   auditpol /set /subcategory:"Security Group Management" /success:enable
 #   auditpol /set /subcategory:"Kerberos Service Ticket Operations" /success:enable
@@ -29,111 +29,106 @@
 #   auditpol /set /subcategory:"SAM" /success:enable
 #   auditpol /set /subcategory:"Other Object Access Events" /success:enable
 #
-# RUN (as Administrator — reading the Security log requires elevation):
-#   powershell -ExecutionPolicy Bypass -File AlphaSentinel.ps1
+#   # run in the BACKGROUND (console closes, monitor + web UI keep running):
+#   Start-Process powershell -ArgumentList '-ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -Background' -WindowStyle Hidden
 #
-# Optional forwarding to the ALPHA web platform:
-#   powershell -ExecutionPolicy Bypass -File AlphaSentinel.ps1 `
-#     -ForwardUrl "https://your-app.vercel.app/api/detections/ingest" `
-#     -ForwardKey "same value as COLLECTOR_API_KEY on the server"
+#   # or run in the FOREGROUND with a small console window:
+#   powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1
 #
-# Optional tuning: -PollSeconds 10 (default 15), -HistoryFile (default
-# sentinel-history.csv next to the script, so acknowledged alerts survive
-# restarts).
+#   # then open:  http://localhost:8443   (or http://<DC-IP>:8443 from any machine)
+#
+# Optional flags:
+#   -Port 8443                  web dashboard port
+#   -PollSeconds 15             event-log poll interval
+#   -Background                 run with no console window (service-style)
+#   -ForwardUrl / -ForwardKey   forward detections to the ALPHA web platform
+#   -HistoryFile                alert history CSV (default sentinel-history.csv)
+#
+# STOP the background monitor:
+#   Stop-Sentinel   (helper function registered globally by this script)
 # ============================================================================
+#Requires -RunAsAdministrator
 
 param(
+  [int]$Port = 8443,
   [int]$PollSeconds = 15,
+  [switch]$Background,
   [string]$ForwardUrl = "",
   [string]$ForwardKey = "",
   [string]$HistoryFile = ""
 )
-
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
 
 if (-not $HistoryFile -and $PSScriptRoot) {
   $HistoryFile = Join-Path $PSScriptRoot "sentinel-history.csv"
 }
 
 # ============================================================
-# THEME — matches the ALPHA site palette (dark, crimson accent)
-# ============================================================
-$C = @{
-  Bg       = [System.Drawing.Color]::FromArgb(13, 12, 10)     # near-black warm
-  Panel    = [System.Drawing.Color]::FromArgb(20, 19, 16)
-  Panel2   = [System.Drawing.Color]::FromArgb(26, 24, 20)
-  Border   = [System.Drawing.Color]::FromArgb(58, 55, 50)
-  Text     = [System.Drawing.Color]::FromArgb(237, 233, 230)
-  TextDim  = [System.Drawing.Color]::FromArgb(150, 145, 135)
-  Crimson  = [System.Drawing.Color]::FromArgb(232, 72, 63)    # ALPHA red
-  Orange   = [System.Drawing.Color]::FromArgb(214, 136, 58)
-  Yellow   = [System.Drawing.Color]::FromArgb(232, 201, 58)
-  Green    = [System.Drawing.Color]::FromArgb(74, 222, 128)
-  Violet   = [System.Drawing.Color]::FromArgb(160, 157, 184)
-}
-
-function New-AlphaLabel($text, $size, $style, $color, $x, $y, $w, $h) {
-  $lbl = New-Object System.Windows.Forms.Label
-  $lbl.Text = $text
-  $lbl.Font = New-Object System.Drawing.Font("Segoe UI", $size, $style)
-  $lbl.ForeColor = $color
-  $lbl.Location = New-Object System.Drawing.Point($x, $y)
-  $lbl.Size = New-Object System.Drawing.Size($w, $h)
-  return $lbl
-}
-
-# ============================================================
-# DETECTION RULES — ported from ALPHA's web platform
-# (utils/detectionRules.js) and extended with AD attack classes:
-# AS-REP roasting, LDAP/SAMR enumeration, log clearing.
+# DETECTION RULES (8 families)
 # ============================================================
 $PrivilegedGroups = @('domain admins', 'enterprise admins', 'schema admins',
                       'administrators', 'account operators', 'backup operators')
 
-# ruleKey -> @{ Title, Severity, Mitre, Remediation }
 $RuleMeta = @{
-  password_spraying       = @{ Severity = 'High';     Title = 'Suspicious Password Spraying Activity'
+  password_spraying       = @{ Severity = 'High';     EventId = '4625';       Title = 'Suspicious Password Spraying Activity'
                                Mitre = 'T1110.003 - Brute Force: Password Spraying'
                                Remediation = 'Enforce account lockout policy, smart-card auth, and password spray detections on the DC. Block the source IP at the firewall.' }
-  privilege_escalation    = @{ Severity = 'Critical'; Title = 'User Added to Privileged Group'
+  privilege_escalation    = @{ Severity = 'Critical'; EventId = '4728/4732';  Title = 'User Added to Privileged Group'
                                Mitre = 'T1078.002 - Valid Accounts: Domain Accounts'
                                Remediation = 'Immediately review group membership changes, reset the added account password, and check for lateral movement from that account.' }
-  kerberoasting           = @{ Severity = 'High';     Title = 'Kerberos Service Ticket Request (Kerberoasting)'
+  kerberoasting           = @{ Severity = 'High';     EventId = '4769';       Title = 'Kerberos Service Ticket Request (Kerberoasting)'
                                Mitre = 'T1558.003 - Steal or Forge Kerberos Tickets: Kerberoasting'
-                               Remediation = 'Use gMSA (group managed service accounts) with 128+ bit keys, disable RC4, and rotate the targeted service account password.' }
-  asrep_roasting          = @{ Severity = 'High';     Title = 'AS-REP Roasting (No-Preauth Ticket Request)'
+                               Remediation = 'Use gMSA with 128+ bit keys, disable RC4, and rotate the targeted service account password.' }
+  asrep_roasting          = @{ Severity = 'High';     EventId = '4768';       Title = 'AS-REP Roasting (No-Preauth Ticket Request)'
                                Mitre = 'T1558.004 - Steal or Forge Kerberos Tickets: AS-REP Roasting'
-                               Remediation = 'Enable "Do not require Kerberos preauthentication"=OFF for all accounts and audit any account with preauth disabled.' }
-  suspicious_remote_logon = @{ Severity = 'Medium';   Title = 'Suspicious Remote Logon'
+                               Remediation = 'Ensure "Do not require Kerberos preauthentication"=OFF for all accounts and audit any account with preauth disabled.' }
+  suspicious_remote_logon = @{ Severity = 'Medium';   EventId = '4624';       Title = 'Suspicious Remote Logon'
                                Mitre = 'T1021 - Remote Services'
                                Remediation = 'Verify the logon is expected, restrict RDP by firewall/GPO, and enable MFA for administrative remote access.' }
-  ldap_recon              = @{ Severity = 'Medium';   Title = 'LDAP / SAMR Domain Enumeration'
+  ldap_recon              = @{ Severity = 'Medium';   EventId = '4662/5141';  Title = 'LDAP / SAMR Domain Enumeration'
                                Mitre = 'T1018 - Remote System Discovery / T1087 - Account Discovery'
                                Remediation = 'Harden SAMR enumeration via GPO (restrict anonymous access) and investigate the source host for recon tooling (BloodHound, SharpHound).' }
-  service_abuse           = @{ Severity = 'Medium';   Title = 'Suspicious Service Creation/Modification'
+  service_abuse           = @{ Severity = 'Medium';   EventId = '4697/7045';  Title = 'Suspicious Service Creation/Modification'
                                Mitre = 'T1543.003 - Create or Modify System Process: Windows Service'
                                Remediation = 'Audit service binaries, restrict service creation to admins, and hunt for encoded PowerShell in the binary path.' }
-  log_tampering           = @{ Severity = 'Critical'; Title = 'Security Log Cleared (Anti-Forensics)'
+  log_tampering           = @{ Severity = 'Critical'; EventId = '1102';       Title = 'Security Log Cleared (Anti-Forensics)'
                                Mitre = 'T1070.001 - Indicator Removal: Clear Windows Event Logs'
                                Remediation = 'Treat as an active intrusion. Isolate the host, preserve remaining logs, and review what was deleted.' }
 }
 
-# sourceIp -> list of (account, time) for password-spray windowing
-$Script:RecentFailedLogons = @{}
-# destAccount -> list of (time) for AS-REP windowing
-$Script:RecentAsrep = @{}
-# sourceIp -> list of time for LDAP recon windowing
-$Script:RecentLdap = @{}
-# ruleKey -> last-fired DateTime (dedupe window)
-$Script:RecentAlertTimes = @{}
-# acknowledged alert keys, persisted across restarts
-$Script:Acknowledged = @{}
+$Script:RecentFailedLogons = @{}   # sourceIp -> list of (account, time)
+$Script:RecentAsrep = @{}          # account -> list of time
+$Script:RecentLdap = @{}           # sourceIp -> list of time
+$Script:RecentAlertTimes = @{}     # ruleKey -> last-fired time (dedupe)
+$Script:Alerts = New-Object System.Collections.Generic.List[object]
+$Script:NextAlertId = 1
 
+# restore history: alerts + ack state survive restarts
 if (Test-Path $HistoryFile) {
   try {
     Import-Csv $HistoryFile | ForEach-Object {
-      if ($_.'Acknowledged' -eq 'yes') { $Script:Acknowledged[$_.AlertKey] = $true }
+      $ruleKey = $_.'RuleKey'
+      if ($ruleKey -and $RuleMeta.ContainsKey($ruleKey)) {
+        $meta = $RuleMeta[$ruleKey]
+        $idInt = 0
+        [void][int]::TryParse($_.'Id', [ref]$idInt)
+        $Script:Alerts.Add([PSCustomObject]@{
+          Id           = $idInt
+          Time         = $_.'Time'
+          RuleKey      = $ruleKey
+          Rule         = $meta.EventId
+          Severity     = $meta.Severity
+          Title        = $meta.Title
+          Mitre        = $meta.Mitre
+          Remediation  = $meta.Remediation
+          Description  = $_.'Description'
+          Host         = $_.'Host'
+          Account      = $_.'Account'
+          SourceIp     = $_.'SourceIp'
+          EventId      = $meta.EventId
+          Acknowledged = ($_.'Acknowledged' -eq 'yes')
+        })
+        if ($idInt -ge $Script:NextAlertId) { $Script:NextAlertId = $idInt + 1 }
+      }
     }
   } catch { }
 }
@@ -151,26 +146,30 @@ function Get-Field($xml, $name) {
   if ($node) { return $node.'#text' } else { return $null }
 }
 
-# Builds the full alert record (all metadata, stable AlertKey for history).
-function New-Alert($ruleKey, $description, $severityOverride, $hostName, $account) {
+function New-Alert($ruleKey, $description, $severityOverride, $hostName, $account, $sourceIp, $realEventId) {
   $meta = $RuleMeta[$ruleKey]
   $sev = if ($severityOverride) { $severityOverride } else { $meta.Severity }
-  return @{
-    RuleKey     = $ruleKey
-    AlertKey    = "$ruleKey|$account|$hostName|$((Get-Date).ToString('yyyyMMdd'))"
-    Severity    = $sev
-    Title       = $meta.Title
-    Mitre       = $meta.Mitre
-    Remediation = $meta.Remediation
-    Description = $description
-    Host        = $hostName
-    Account     = $account
-    Time        = Get-Date
+  $alert = [PSCustomObject]@{
+    Id           = $Script:NextAlertId
+    Time         = (Get-Date).ToUniversalTime().ToString("o")
+    RuleKey      = $ruleKey
+    Rule         = $meta.EventId
+    Severity     = $sev
+    Title        = $meta.Title
+    Mitre        = $meta.Mitre
+    Remediation  = $meta.Remediation
+    Description  = $description
+    Host         = $hostName
+    Account      = $account
+    SourceIp     = $sourceIp
+    EventId      = "$realEventId"
     Acknowledged = $false
   }
+  $Script:NextAlertId++
+  return $alert
 }
 
-# Returns an alert hashtable, or $null if this event didn't trigger anything.
+# Returns an alert object, or $null if this event didn't trigger anything.
 function Evaluate-Event($e) {
   $xml = [xml]$e.ToXml()
   $id = $e.Id
@@ -187,7 +186,7 @@ function Evaluate-Event($e) {
       $Script:RecentFailedLogons[$srcIp] += [PSCustomObject]@{ Account = $account; Time = Get-Date }
       $distinct = ($Script:RecentFailedLogons[$srcIp] | Select-Object -ExpandProperty Account -Unique).Count
       if ($distinct -ge 5 -and -not (Should-Dedupe "password_spraying")) {
-        return New-Alert "password_spraying" "$distinct distinct accounts failed to authenticate from $srcIp within 10 minutes." $null $hostName $account
+        return New-Alert "password_spraying" "$distinct distinct accounts failed to authenticate from $srcIp within 10 minutes." $null $hostName $account $srcIp $id
       }
     }
     { $_ -in 4728, 4732 } {
@@ -196,7 +195,7 @@ function Evaluate-Event($e) {
       $group = Get-Field $xml "TargetUserName"
       if ($group -and ($PrivilegedGroups | Where-Object { $group.ToLower().Contains($_) })) {
         if (-not (Should-Dedupe "privilege_escalation")) {
-          return New-Alert "privilege_escalation" "Account `"$account`" was added to privileged group `"$group`"." $null $hostName $account
+          return New-Alert "privilege_escalation" "Account `"$account`" was added to privileged group `"$group`"." $null $hostName $account $null $id
         }
       }
     }
@@ -206,11 +205,11 @@ function Evaluate-Event($e) {
       if ($encType -eq "0x17" -and -not (Should-Dedupe "kerberoasting")) {
         $account = Get-Field $xml "TargetUserName"
         $service = Get-Field $xml "ServiceName"
-        return New-Alert "kerberoasting" "Service ticket requested for `"$service`" using weak RC4 encryption (0x17) - account `"$account`"." $null $hostName $account
+        return New-Alert "kerberoasting" "Service ticket requested for `"$service`" using weak RC4 encryption (0x17) - account `"$account`"." $null $hostName $account $null $id
       }
     }
     4768 {
-      # AS-REP roasting heuristic: repeated no-preauth TGT requests for distinct accounts
+      # AS-REP roasting heuristic: repeated no-preauth TGT requests
       $account = Get-Field $xml "TargetUserName"
       if (-not $account) { return $null }
       if (-not $Script:RecentAsrep.ContainsKey($account)) { $Script:RecentAsrep[$account] = @() }
@@ -218,7 +217,7 @@ function Evaluate-Event($e) {
       $Script:RecentAsrep[$account] += Get-Date
       $preAuthType = Get-Field $xml "PreAuthType"
       if ($preAuthType -eq "0" -and $Script:RecentAsrep[$account].Count -ge 3 -and -not (Should-Dedupe "asrep_roasting")) {
-        return New-Alert "asrep_roasting" "Repeated no-preauth TGT requests for `"$account`" (AS-REP roasting pattern)." $null $hostName $account
+        return New-Alert "asrep_roasting" "Repeated no-preauth TGT requests for `"$account`" (AS-REP roasting pattern)." $null $hostName $account $null $id
       }
     }
     4624 {
@@ -230,12 +229,11 @@ function Evaluate-Event($e) {
       $isNetworkAdmin = ($logonType -eq "3") -and ($account -match "admin")
       if (($isRdp -or $isNetworkAdmin) -and -not (Should-Dedupe "suspicious_remote_logon")) {
         $kind = if ($isRdp) { 'Remote desktop' } else { 'Network' }
-        return New-Alert "suspicious_remote_logon" "$kind logon by `"$account`" from $srcIp." $null $hostName $account
+        return New-Alert "suspicious_remote_logon" "$kind logon by `"$account`" from $srcIp." $null $hostName $account $srcIp $id
       }
     }
     { $_ -in 4662, 5141 } {
-      # LDAP/SAMR recon: repeated directory reads of privileged objects from one source
-      # (4662 = operation on directory object; keyed on "SAM" access or user objects)
+      # LDAP/SAMR recon: 25+ directory object reads from one source / 5 min
       $srcIp = Get-Field $xml "IpAddress"
       $objName = Get-Field $xml "ObjectName"
       $objType = Get-Field $xml "ObjectType"
@@ -245,7 +243,7 @@ function Evaluate-Event($e) {
       $Script:RecentLdap[$srcIp] = @($Script:RecentLdap[$srcIp] | Where-Object { $_ -gt (Get-Date).AddMinutes(-5) })
       $Script:RecentLdap[$srcIp] += Get-Date
       if ($Script:RecentLdap[$srcIp].Count -ge 25 -and -not (Should-Dedupe "ldap_recon")) {
-        return New-Alert "ldap_recon" "25+ directory object reads (e.g. `"$objName`") from $srcIp within 5 minutes - domain enumeration pattern." $null $hostName $objName
+        return New-Alert "ldap_recon" "25+ directory object reads (e.g. `"$objName`") from $srcIp within 5 minutes - domain enumeration pattern." $null $hostName $objName $srcIp $id
       }
     }
     { $_ -in 4697, 7045 } {
@@ -255,13 +253,13 @@ function Evaluate-Event($e) {
       $suspicious = $path -match "(?i)powershell|cmd\.exe|-enc|\\temp\\|\\users\\public\\"
       if (-not (Should-Dedupe "service_abuse")) {
         $sev = if ($suspicious) { "High" } else { "Medium" }
-        return New-Alert "service_abuse" "New service `"$service`" created$(if($path){" (binary: $path)"})." $sev $hostName $service
+        return New-Alert "service_abuse" "New service `"$service`" created$(if($path){" (binary: $path)"})." $sev $hostName $service $null $id
       }
     }
     1102 {
       # Anti-forensics: security log cleared
       if (-not (Should-Dedupe "log_tampering")) {
-        return New-Alert "log_tampering" "The Security event log was cleared on $hostName." $null $hostName ($e.Machine)
+        return New-Alert "log_tampering" "The Security event log was cleared on $hostName." $null $hostName ($e.Machine) $null $id
       }
     }
   }
@@ -269,293 +267,274 @@ function Evaluate-Event($e) {
 }
 
 # ============================================================
-# FORM LAYOUT
+# ALERT STORE: history persistence, CSV export
 # ============================================================
-$form = New-Object System.Windows.Forms.Form
-$form.Text = "ALPHA Sentinel — AD / Network Attack Monitor"
-$form.Size = New-Object System.Drawing.Size(1180, 700)
-$form.MinimumSize = New-Object System.Drawing.Size(980, 620)
-$form.StartPosition = "CenterScreen"
-$form.BackColor = $C.Bg
-$form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-
-# --- header ---
-$header = New-Object System.Windows.Forms.Panel
-$header.Size = New-Object System.Drawing.Size(1160, 44)
-$header.Location = New-Object System.Drawing.Point(10, 8)
-$header.Anchor = "Top,Left,Right"
-$header.BackColor = $C.Panel
-$form.Controls.Add($header)
-$header.Controls.Add((New-AlphaLabel "ALPHA SENTINEL" 13 ([System.Drawing.FontStyle]::Bold) $C.Crimson 12 10 170 24))
-$header.Controls.Add((New-AlphaLabel "AD / Network Attack Monitor — Kerberos · LDAP · Spraying · Privesc · Services" 9 ([System.Drawing.FontStyle]::Regular) $C.TextDim 190 12 600 24))
-
-# --- severity dashboard ---
-$dashPanel = New-Object System.Windows.Forms.Panel
-$dashPanel.Size = New-Object System.Drawing.Size(1160, 64)
-$dashPanel.Location = New-Object System.Drawing.Point(10, 56)
-$dashPanel.Anchor = "Top,Left,Right"
-$dashPanel.BackColor = $C.Panel
-$form.Controls.Add($dashPanel)
-
-$counts = @{ Critical = 0; High = 0; Medium = 0; Low = 0 }
-$sevColors = @{ Critical = $C.Crimson; High = $C.Orange; Medium = $C.Yellow; Low = $C.Green }
-$countLabels = @{}
-$i = 0
-foreach ($sev in @("Critical", "High", "Medium", "Low")) {
-  $lbl = New-AlphaLabel "$sev`: 0" 15 ([System.Drawing.FontStyle]::Bold) $sevColors[$sev] (14 + $i * 285) 8 260 26
-  $lbl.Tag = $sev
-  $lbl.Cursor = [System.Windows.Forms.Cursors]::Hand
-  # click a severity tile to filter the table to that severity (click again = all)
-  $lbl.Add_Click({
-    $script:SeverityFilter = if ($script:SeverityFilter -eq $this.Tag) { $null } else { $this.Tag }
-    foreach ($k in $countLabels.Keys) {
-      $countLabels[$k].Text = if ($script:SeverityFilter -and $k -ne $script:SeverityFilter) { "$k`: $($counts[$k])" } else { "$k`: $($counts[$k])" }
-    }
-  })
-  $dashPanel.Controls.Add($lbl)
-  $countLabels[$sev] = $lbl
-  $i++
-}
-$ackLabel = New-AlphaLabel "Acknowledged: 0" 9 ([System.Drawing.FontStyle]::Regular) $C.TextDim 900 34 240 20
-$dashPanel.Controls.Add($ackLabel)
-
-# --- alert table ---
-$grid = New-Object System.Windows.Forms.DataGridView
-$grid.Location = New-Object System.Drawing.Point(10, 126)
-$grid.Size = New-Object System.Drawing.Size(700, 470)
-$grid.Anchor = "Top,Bottom,Left,Right"
-$grid.BackgroundColor = $C.Panel
-$grid.ForeColor = $C.Text
-$grid.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-$grid.DefaultCellStyle.BackColor = $C.Panel
-$grid.DefaultCellStyle.ForeColor = $C.Text
-$grid.DefaultCellStyle.SelectionBackColor = $C.Panel2
-$grid.DefaultCellStyle.SelectionForeColor = $C.Crimson
-$grid.ColumnHeadersDefaultCellStyle.BackColor = $C.Panel2
-$grid.ColumnHeadersDefaultCellStyle.ForeColor = $C.Text
-$grid.EnableHeadersVisualStyles = $false
-$grid.ReadOnly = $true
-$grid.AutoSizeColumnsMode = "Fill"
-$grid.RowHeadersVisible = $false
-$grid.AllowUserToAddRows = $false
-$grid.Columns.Add("Time", "Time") | Out-Null
-$grid.Columns.Add("Severity", "Severity") | Out-Null
-$grid.Columns.Add("Title", "Alert") | Out-Null
-$grid.Columns.Add("Account", "Account") | Out-Null
-$grid.Columns.Add("Host", "Host") | Out-Null
-$grid.Columns["Time"].FillWeight = 10
-$grid.Columns["Severity"].FillWeight = 12
-$grid.Columns["Title"].FillWeight = 38
-$grid.Columns["Account"].FillWeight = 18
-$grid.Columns["Host"].FillWeight = 22
-$form.Controls.Add($grid)
-
-# --- detail pane ---
-$detail = New-Object System.Windows.Forms.Panel
-$detail.Size = New-Object System.Drawing.Size(450, 470)
-$detail.Location = New-Object System.Drawing.Point(720, 126)
-$detail.Anchor = "Top,Bottom,Right"
-$detail.BackColor = $C.Panel
-$form.Controls.Add($detail)
-
-$dTitle   = New-AlphaLabel "" 12 ([System.Drawing.FontStyle]::Bold) $C.Crimson 12 12 424 44
-$dSev     = New-AlphaLabel "" 10 ([System.Drawing.FontStyle]::Bold) $C.TextDim 12 58 424 22
-$dMitre   = New-AlphaLabel "" 9 ([System.Drawing.FontStyle]::Regular) $C.Violet 12 82 424 22
-$dHost    = New-AlphaLabel "" 9 ([System.Drawing.FontStyle]::Regular) $C.TextDim 12 106 424 22
-$dDesc    = New-AlphaLabel "" 9.5 ([System.Drawing.FontStyle]::Regular) $C.Text 12 134 424 120
-$dRemLbl  = New-AlphaLabel "REMEDIATION" 9 ([System.Drawing.FontStyle]::Bold) $C.TextDim 12 258 424 20
-$dRem     = New-AlphaLabel "" 9 ([System.Drawing.FontStyle]::Regular) $C.Green 12 280 424 130
-$detail.Controls.AddRange(@($dTitle, $dSev, $dMitre, $dHost, $dDesc, $dRemLbl, $dRem))
-
-# --- action bar ---
-$ackBtn = New-Object System.Windows.Forms.Button
-$ackBtn.Text = "ACKNOWLEDGE"
-$ackBtn.Size = New-Object System.Drawing.Size(130, 30)
-$ackBtn.Location = New-Object System.Drawing.Point(12, 560)
-$ackBtn.Anchor = "Bottom,Left"
-$ackBtn.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-$ackBtn.FlatAppearance.BorderColor = $C.Crimson
-$ackBtn.FlatAppearance.MouseOverBackColor = $C.Panel2
-$ackBtn.BackColor = $C.Panel
-$ackBtn.ForeColor = $C.Crimson
-$form.Controls.Add($ackBtn)
-
-$exportBtn = New-Object System.Windows.Forms.Button
-$exportBtn.Text = "EXPORT CSV"
-$exportBtn.Size = New-Object System.Drawing.Size(110, 30)
-$exportBtn.Location = New-Object System.Drawing.Point(150, 560)
-$exportBtn.Anchor = "Bottom,Left"
-$exportBtn.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-$exportBtn.FlatAppearance.BorderColor = $C.Border
-$exportBtn.FlatAppearance.MouseOverBackColor = $C.Panel2
-$exportBtn.BackColor = $C.Panel
-$exportBtn.ForeColor = $C.Text
-$form.Controls.Add($exportBtn)
-
-$statusLabel = New-AlphaLabel "Starting..." 9 ([System.Drawing.FontStyle]::Regular) $C.TextDim 280 566 700 20
-$statusLabel.Anchor = "Bottom,Left,Right"
-$form.Controls.Add($statusLabel)
-
-$notifyIcon = New-Object System.Windows.Forms.NotifyIcon
-$notifyIcon.Icon = [System.Drawing.SystemIcons]::Shield
-$notifyIcon.Visible = $true
-$notifyIcon.Text = "ALPHA Sentinel — AD Attack Monitor"
-
-# ============================================================
-# STATE + ACTIONS
-# ============================================================
-$Script:AllAlerts = New-Object System.Collections.Generic.List[object]
-$Script:SelectedAlert = $null
-$script:SeverityFilter = $null
-
-function Update-Dashboard {
-  foreach ($sev in $countLabels.Keys) {
-    $countLabels[$sev].Text = "$sev`: $($counts[$sev])"
-  }
-  $ackCount = ($Script:AllAlerts | Where-Object { $_.Acknowledged }).Count
-  $ackLabel.Text = "Acknowledged: $ackCount of $($Script:AllAlerts.Count)"
-}
-
-function Add-Alert($alert) {
-  $Script:AllAlerts.Add([PSCustomObject]$alert)
-  if ($counts.ContainsKey($alert.Severity)) { $counts[$alert.Severity]++ }
-  Update-Dashboard
-
-  if ($alert.Severity -in @("Critical", "High") -and -not $alert.Acknowledged) {
-    $notifyIcon.BalloonTipTitle = "$($alert.Severity): $($alert.Title)"
-    $notifyIcon.BalloonTipText = $alert.Description
-    $notifyIcon.ShowBalloonTip(8000)
-  }
-}
-
-function Refresh-Grid {
-  $grid.Rows.Clear()
-  $alerts = $Script:AllAlerts | Sort-Object Time
-  if ($script:SeverityFilter) { $alerts = $alerts | Where-Object { $_.Severity -eq $script:SeverityFilter } }
-  foreach ($a in $alerts) {
-    $rowIdx = $grid.Rows.Add($a.Time.ToString("HH:mm:ss"), $a.Severity, $a.Title, $a.Account, $a.Host)
-    $row = $grid.Rows[$rowIdx]
-    $row.DefaultCellStyle.ForeColor = $sevColors[[string]$a.Severity]
-    if ($a.Acknowledged) {
-      $row.DefaultCellStyle.ForeColor = $C.TextDim
-      $row.Cells[2].Value = "[ack] $($a.Title)"
-    }
-  }
-  if ($grid.Rows.Count -gt 0) {
-    $grid.FirstDisplayedScrollingRowIndex = $grid.Rows.Count - 1
-  }
-}
-
-# row select -> detail pane
-$grid.Add_SelectionChanged({
+function Save-History {
   try {
-    $row = $grid.CurrentRow
-    if (-not $row) { return }
-    $timeStr = $row.Cells[0].Value
-    $title = $row.Cells[2].Value -replace '^\[ack\] ', ''
-    $match = $Script:AllAlerts | Where-Object { $_.Time.ToString("HH:mm:ss") -eq $timeStr -and $_.Title -eq $title } | Select-Object -Last 1
-    if ($match) {
-      $Script:SelectedAlert = $match
-      $dTitle.Text = $match.Title
-      $dSev.Text = "SEVERITY: $($match.Severity)$(if ($match.Acknowledged) { '   [ACKNOWLEDGED]' })"
-      $dMitre.Text = "MITRE: $($match.Mitre)"
-      $dHost.Text = "HOST: $($match.Host)   ACCOUNT: $($match.Account)"
-      $dDesc.Text = $match.Description
-      $dRem.Text = $match.Remediation
-    }
-  } catch { }
-})
-
-$ackBtn.Add_Click({
-  if ($Script:SelectedAlert) {
-    $Script:SelectedAlert.Acknowledged = $true
-    $Script:Acknowledged[$Script:SelectedAlert.AlertKey] = $true
-    Refresh-Grid
-    Update-Dashboard
-    $statusLabel.Text = "Acknowledged: $($Script:SelectedAlert.Title)"
-  }
-})
-
-$exportBtn.Add_Click({
-  try {
-    $sfd = New-Object System.Windows.Forms.SaveFileDialog
-    $sfd.Filter = "CSV files (*.csv)|*.csv"
-    $sfd.FileName = "alpha-sentinel-alerts-$(Get-Date -Format 'yyyyMMdd-HHmm').csv"
-    if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-      $Script:AllAlerts | Select-Object Time, Severity, Title, Mitre, Account, Host, Description, Acknowledged |
-        Export-Csv -Path $sfd.FileName -NoTypeInformation
-      $statusLabel.Text = "Exported $($Script:AllAlerts.Count) alerts to $($sfd.FileName)"
-    }
-  } catch {
-    $statusLabel.Text = "Export failed: $_"
-  }
-})
-
-# persist acknowledged state on close
-$form.Add_FormClosing({
-  try {
-    $Script:AllAlerts |
-      Select-Object @{ n = 'AlertKey'; e = { $_.AlertKey } }, @{ n = 'Acknowledged'; e = { if ($_.Acknowledged) { 'yes' } else { 'no' } } } |
+    $Script:Alerts |
+      Select-Object Id, Time, RuleKey, Severity, Description, Host, Account, SourceIp, @{ n = 'Acknowledged'; e = { if ($_.Acknowledged) { 'yes' } else { 'no' } } } |
       Export-Csv -Path $HistoryFile -NoTypeInformation -Force
   } catch { }
-  $notifyIcon.Visible = $false
-})
+}
+
+function Export-AlertsCsv($path) {
+  $Script:Alerts |
+    Select-Object Id, Time, RuleKey, Severity, Title, Mitre, Account, Host, SourceIp, Description, @{ n = 'Acknowledged'; e = { if ($_.Acknowledged) { 'yes' } else { 'no' } } } |
+    Export-Csv -Path $path -NoTypeInformation -Force
+  return $Script:Alerts.Count
+}
 
 # ============================================================
-# OPTIONAL WEB FORWARDING — same payload shape the collector uses
+# EMBEDDED WEB SERVER (dashboard + JSON API) — HttpListener, no deps
 # ============================================================
-$forwarded = 0
+$Script:DashboardDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+
+function Send-Bytes($res, $bytes, $contentType, $status = 200) {
+  $res.StatusCode = $status
+  $res.ContentType = $contentType
+  $res.ContentLength64 = $bytes.Length
+  $res.OutputStream.Write($bytes, 0, $bytes.Length)
+}
+function Send-Json($res, $json, $status = 200) {
+  Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes($json)) 'application/json; charset=utf-8' $status
+}
+function Send-File($res, $path, $contentType) {
+  # fail LOUDLY (500 + clear message) instead of silently returning an empty
+  # 200 when dashboard.html/dashboard.js is missing (e.g. iex-invoked run or
+  # only the .ps1 was copied)
+  if (-not (Test-Path $path)) {
+    $name = [IO.Path]::GetFileName($path)
+    Send-Json $res ('{"error":"' + $name + ' not found next to AlphaSentinel.ps1 - download the full release (dashboard.html + dashboard.js must sit beside the script)."}') 500
+    return
+  }
+  Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes((Get-Content -Raw $path))) $contentType
+}
+
+function Start-WebServer {
+  $listener = New-Object System.Net.HttpListener
+  $listener.Prefixes.Add("http://+:$Port/")
+  $listener.Start()
+  Write-Host "  [web] dashboard listening on http://+:$Port/"
+  return $listener
+}
+
+# Handle a single HTTP request context. Called from the MAIN thread loop —
+# single-threaded by design: PowerShell scriptblocks cannot run on .NET
+# ThreadPool threads without a runspace, so the earlier Task.Run web thread
+# died silently. One loop drains web requests AND polls the event log
+# (works on PS 5.1 / Windows Server 2012).
+function Invoke-Handler($ctx) {
+  $path = $ctx.Request.Url.AbsolutePath
+  $res = $ctx.Response
+  try {
+          switch -Regex ($path) {
+            '^/$' {
+              Send-File $res (Join-Path $Script:DashboardDir 'dashboard.html') 'text/html; charset=utf-8'
+            }
+            '^/dashboard\.js$' {
+              Send-File $res (Join-Path $Script:DashboardDir 'dashboard.js') 'application/javascript; charset=utf-8'
+            }
+            '^/api/alerts$' {
+              $json = if ($Script:Alerts.Count -eq 0) { '[]' } else { $Script:Alerts | ConvertTo-Json -Depth 4 -Compress }
+              if ($Script:Alerts.Count -eq 1) { $json = "[$json]" }
+              Send-Json $res $json
+            }
+            '^/api/alerts/(\d+)/ack$' {
+              $alert = $Script:Alerts | Where-Object { $_.Id -eq [int]$Matches[1] } | Select-Object -First 1
+              if ($alert) {
+                $alert.Acknowledged = $true
+                Save-History
+                Send-Json $res '{"ok":true,"acknowledged":true}'
+              } else { Send-Json $res '{"error":"Alert not found."}' 404 }
+            }
+            '^/api/alerts/(\d+)/unack$' {
+              $alert = $Script:Alerts | Where-Object { $_.Id -eq [int]$Matches[1] } | Select-Object -First 1
+              if ($alert) {
+                $alert.Acknowledged = $false
+                Save-History
+                Send-Json $res '{"ok":true,"acknowledged":false}'
+              } else { Send-Json $res '{"error":"Alert not found."}' 404 }
+            }
+            '^/api/export\.csv$' {
+              $tmp = [IO.Path]::GetTempFileName()
+              $null = Export-AlertsCsv $tmp
+              $res.Headers.Add('Content-Disposition', 'attachment; filename="alpha-sentinel-alerts.csv"')
+              Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes((Get-Content -Raw $tmp))) 'text/csv; charset=utf-8'
+              Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            }
+            '^/api/self-test$' {
+              # fires 8 synthetic events through the REAL rule engine — same code path
+              # as live event-log polling — and returns what fired.
+              $fired = @()
+              # snapshot trackers so repeated self-tests are deterministic and
+              # probe events never pollute the live dedupe/brute-force state
+              $savedTimes = $Script:RecentAlertTimes
+              $savedFailed = $Script:RecentFailedLogons
+              $savedAsrep = $Script:RecentAsrep
+              $savedLdap = $Script:RecentLdap
+              $Script:RecentAlertTimes = @{}
+              $Script:RecentFailedLogons = @{}
+              $Script:RecentAsrep = @{}
+              $Script:RecentLdap = @{}
+              $probe = @(
+                @{ id = 4625; fields = @{ TargetUserName = 'sentinel-selftest'; IpAddress = '127.0.0.99' } }
+                @{ id = 4728; fields = @{ MemberName = 'sentinel-selftest'; TargetUserName = 'Domain Admins' } }
+                @{ id = 4769; fields = @{ TargetUserName = 'sentinel-selftest'; ServiceName = 'MSSQLSvc/selftest'; TicketEncryptionType = '0x17' } }
+                @{ id = 4624; fields = @{ TargetUserName = 'administrator'; IpAddress = '127.0.0.99'; LogonType = '10' } }
+                @{ id = 7045; fields = @{ ServiceName = 'SentinelSelfTest'; ServiceFileName = 'C:\Users\Public\selftest.exe -enc AA==' } }
+                @{ id = 1102; fields = @{} }
+              )
+              $firedAlerts = @()
+              foreach ($p in $probe) {
+                $fieldsXml = ($p.fields.GetEnumerator() | ForEach-Object { "<Data Name='$($_.Key)'>$($_.Value)</Data>" }) -join ''
+                $xmlString = "<Event><System><EventID>$($p.id)</EventID><Computer>SENTINEL-SELFTEST</Computer></System><EventData>$fieldsXml</EventData></Event>"
+                $shim = New-Object PSObject
+                $shimXml = [xml]$xmlString
+                $shim | Add-Member -MemberType NoteProperty -Name Id -Value $p.id -Force
+                $shim | Add-Member -MemberType NoteProperty -Name Machine -Value 'SENTINEL-SELFTEST' -Force
+                $shim | Add-Member -MemberType ScriptProperty -Name XmlObj -Value ({ return $shimXml }.GetNewClosure()) -Force
+                $shim | Add-Member -MemberType ScriptMethod -Name ToXml -Value { return $this.XmlObj.OuterXml } -Force
+                $alert = Evaluate-Event $shim
+                if ($alert) {
+                  # land self-test alerts in the real store: they appear in the
+                  # dashboard table (severity colors, MITRE, remediation) — the
+                  # purple-team demo value — and export marked SENTINEL-SELFTEST
+                  $alert.Description = "[SELF-TEST] $($alert.Description)"
+                  $Script:Alerts.Add($alert)
+                  Save-History
+                  $firedAlerts += $alert
+                  $fired += "$($alert.Severity): $($alert.Title)"
+                }
+              }
+              $Script:RecentAlertTimes = $savedTimes
+              $Script:RecentFailedLogons = $savedFailed
+              $Script:RecentAsrep = $savedAsrep
+              $Script:RecentLdap = $savedLdap
+              Send-Json $res (@{ ok = $true; alertsFired = $firedAlerts.Count; fired = $fired } | ConvertTo-Json)
+            }
+            '^/api/health$' {
+              Send-Json $res (@{ ok = $true; alerts = $Script:Alerts.Count; uptime = $true } | ConvertTo-Json)
+            }
+            default {
+              Send-Json $res '{"error":"Not found."}' 404
+            }
+          }
+  } catch {
+    try { Send-Json $res ('{"error":"' + (($_.Exception.Message) -replace '"', "'") + '"}') 500 } catch { }
+  } finally {
+    try { $res.OutputStream.Close() } catch { }
+  }
+}
+
+# ============================================================
+# OPTIONAL WEB FORWARDING (real event IDs — matches platform rules)
+# ============================================================
+$Script:Forwarded = 0
 function Forward-ToWeb($alert) {
   if (-not $ForwardUrl -or -not $ForwardKey) { return }
   try {
-    # Map the alert onto the platform's ingest schema (utils/detectionRules.js
-    # understands: eventId, accountName, sourceIp, targetGroup, encryptionType,
-    # logonType, serviceName, serviceBinaryPath, hostname). We re-send the
-    # ORIGINAL Windows event id so the server-side rules actually match.
     $body = @{
-      eventId   = "$($alert.EventId)"
-      source    = "collector"
-      hostname  = "$($alert.Host)"
+      eventId     = "$($alert.EventId)"
+      source      = "collector"
+      hostname    = "$($alert.Host)"
       accountName = "$($alert.Account)"
-      timestamp = (Get-Date).ToUniversalTime().ToString("o")
+      timestamp   = $alert.Time
     } | ConvertTo-Json
     Invoke-RestMethod -Uri $ForwardUrl -Method Post -Body $body -ContentType "application/json" `
       -Headers @{ "X-Alpha-Collector-Key" = $ForwardKey } -ErrorAction Stop | Out-Null
-    $script:forwarded++
+    $Script:Forwarded++
   } catch { }
 }
 
 # ============================================================
-# EVENT-LOG POLLING
+# EVENT-LOG POLLING LOOP
 # ============================================================
 $EventIds = @(4625, 4728, 4732, 4768, 4769, 4662, 5141, 4624, 4697, 7045, 1102)
 $Script:LastCheck = (Get-Date).AddMinutes(-2)
+$Script:ProcessedCount = 0
 
-$timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = $PollSeconds * 1000
-$timer.Add_Tick({
+function Invoke-PollOnce {
   try {
     $events = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = $EventIds; StartTime = $Script:LastCheck } -ErrorAction SilentlyContinue
     if ($events) {
       foreach ($e in @($events)) {
         $alert = Evaluate-Event $e
         if ($alert) {
-          # -MemberType NoteProperty form works on Windows Server 2012's
-          # PowerShell 3.0 too (-NotePropertyName does not)
-          $alert | Add-Member -MemberType NoteProperty -Name EventId -Value $e.Id
-          Add-Alert $alert
+          $Script:Alerts.Add($alert)
+          $Script:ProcessedCount++
           Forward-ToWeb $alert
         }
       }
+      Save-History
     }
     $Script:LastCheck = Get-Date
-    $fwd = if ($script:forwarded -gt 0) { "  |  forwarded to web: $($script:forwarded)" } else { "" }
-    $statusLabel.Text = "Last checked: $(Get-Date -Format 'HH:mm:ss')  |  monitoring Security log every $PollSeconds sec$fwd"
+    return $true
   } catch {
-    $statusLabel.Text = "Error reading event log: $_  (run as Administrator?)"
+    Write-Host "  [poll] error: $_" -ForegroundColor Red
+    return $false
   }
-})
-$timer.Start()
+}
 
-$form.Add_Shown({ $statusLabel.Text = "Monitoring started — Security event log, every $PollSeconds sec." })
-[System.Windows.Forms.Application]::Run($form)
+# ============================================================
+# STOP HELPER — registered globally so any console can stop the monitor
+# ============================================================
+# callable from ANY console as `Stop-Sentinel` (a plain scriptblock variable
+# would not be invocable by that name from another session)
+function global:Stop-Sentinel {
+  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*AlphaSentinel.ps1*' -and $_.ProcessId -ne $PID } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "stopped sentinel process $($_.ProcessId)"
+    }
+}
+
+# ============================================================
+# MAIN — start web server, single-threaded request/poll loop
+# ============================================================
+$listener = Start-WebServer
+
+Write-Host ""
+Write-Host "  ============================================================" -ForegroundColor Red
+Write-Host "   ALPHA SENTINEL v2 - AD / Network Attack Monitor" -ForegroundColor Red
+Write-Host "  ============================================================" -ForegroundColor Red
+Write-Host "   Web dashboard : http://localhost:$Port   (LAN: http://<this-ip>:$Port)" -ForegroundColor Green
+Write-Host "   Polling       : Security event log every $PollSeconds sec"
+Write-Host "   Rules         : 8 families (spray, privesc, kerberoast, AS-REP,"
+Write-Host "                   LDAP recon, remote logon, service abuse, log tamper)"
+if ($ForwardUrl) { Write-Host "   Forwarding    : enabled -> $ForwardUrl" -ForegroundColor Yellow }
+else { Write-Host "   Forwarding    : off (standalone mode)" -ForegroundColor DarkGray }
+Write-Host "   History       : $HistoryFile"
+Write-Host "   Stop          : run Stop-Sentinel from any PowerShell console"
+Write-Host "   Self-test     : open http://localhost:$Port/api/self-test"
+Write-Host ""
+Write-Host "   Press Ctrl+C to stop. Dashboard serves while this runs." -ForegroundColor DarkGray
+Write-Host ""
+
+# MAIN LOOP — a single thread drains web requests AND polls the event log.
+# PowerShell scriptblocks cannot run on .NET ThreadPool threads without a
+# runspace, so both loops live on the main thread; the 250 ms sleep keeps the
+# loop nearly idle. Works on PS 5.1 / Windows Server 2012.
+$Script:NextPoll = (Get-Date).AddSeconds(1)
+$Script:PendingTask = $null
+try {
+  while ($true) {
+    if ($null -ne $Script:PendingTask -and $Script:PendingTask.IsCompleted) {
+      $ctx = $Script:PendingTask.Result
+      $Script:PendingTask = $null
+      $null = Invoke-Handler $ctx
+      continue   # drain any further queued requests immediately
+    }
+    if ($null -eq $Script:PendingTask) {
+      $Script:PendingTask = $listener.GetContextAsync()
+    }
+    if ((Get-Date) -ge $Script:NextPoll) {
+      $null = Invoke-PollOnce
+      $Script:NextPoll = (Get-Date).AddSeconds($PollSeconds)
+    }
+    Start-Sleep -Milliseconds 250
+  }
+} finally {
+  try { $listener.Stop() } catch { }
+  Save-History
+}
