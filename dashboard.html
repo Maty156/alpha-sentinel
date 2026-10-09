@@ -73,8 +73,8 @@ button { font-family: inherit; cursor: pointer; }
 .wrap { max-width: 1400px; margin: 0 auto; padding: 24px; }
 
 /* ---------- stats ---------- */
-.stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-bottom: 20px; }
-@media (max-width: 1100px) { .stats { grid-template-columns: repeat(3, 1fr); } }
+.stats { display: grid; grid-template-columns: repeat(7, 1fr); gap: 14px; margin-bottom: 20px; }
+@media (max-width: 1240px) { .stats { grid-template-columns: repeat(4, 1fr); } }
 @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
 .stat {
   border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px;
@@ -89,6 +89,103 @@ button { font-family: inherit; cursor: pointer; }
 .stat.med  { --stat-color: var(--yellow); }
 .stat.low  { --stat-color: var(--green); }
 .stat.neutral { --stat-color: var(--text-1); }
+
+/* ---------- detection coverage ---------- */
+.coverage-panel {
+  border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+  background: var(--panel); margin-bottom: 20px;
+}
+.coverage-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 18px; cursor: pointer; user-select: none; flex-wrap: wrap;
+  transition: background var(--t);
+}
+.coverage-bar:hover { background: rgba(255,255,255,0.02); }
+.coverage-bar h2 {
+  font-size: 11px; font-weight: 800; letter-spacing: 0.8px; text-transform: uppercase;
+  color: var(--text-0); display: flex; align-items: center; gap: 8px;
+}
+.coverage-bar .cov-sum { font-size: 12px; color: var(--text-2); font-family: var(--mono); }
+.coverage-bar .cov-caret { color: var(--text-2); transition: transform var(--t); font-size: 11px; }
+.coverage-bar.open .cov-caret { transform: rotate(90deg); }
+.coverage-body { display: none; border-top: 1px solid var(--border); padding: 16px 18px 4px; }
+.coverage-body.open { display: block; }
+.cov-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+#ruleSearch {
+  flex: 1; min-width: 200px; background: var(--bg-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 9px 12px; color: var(--text-0); font-size: 12.5px; font-family: inherit;
+}
+#ruleSearch:focus { outline: none; border-color: var(--red); }
+.cov-btn {
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 7px;
+  padding: 7px 12px; color: var(--text-1); font-size: 11.5px; font-weight: 700;
+  transition: all var(--t);
+}
+.cov-btn:hover { border-color: var(--border-bright); color: var(--text-0); }
+.cov-btn.active { background: rgba(232,72,63,0.12); border-color: rgba(232,72,63,0.45); color: var(--red-light); }
+.cov-rule { font-weight: 600; color: var(--text-0); font-size: 13px; }
+.cov-key { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text-2); margin-top: 2px; }
+.cov-cat { font-size: 11.5px; color: var(--text-1); }
+.cov-mitre { font-family: var(--mono); font-size: 11px; color: var(--text-1); }
+.fired-tag { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+.fired-tag.hit { color: var(--green); font-weight: 700; }
+
+/* ---------- audit-policy preflight ---------- */
+.audit-banner {
+  border: 1px solid var(--border); border-left-width: 3px; border-radius: 10px;
+  padding: 12px 15px; margin-bottom: 14px; font-size: 12.5px; color: var(--text-1);
+  background: rgba(255,255,255,0.02); line-height: 1.6;
+}
+.audit-banner strong { color: var(--text-0); }
+.audit-banner.ok { border-left-color: var(--green); }
+.audit-banner.warn { border-left-color: var(--amber); }
+.audit-banner.danger { border-left-color: var(--red); }
+.audit-banner .audit-list { margin: 8px 0 4px; padding-left: 20px; }
+.audit-banner .audit-list li { margin-bottom: 3px; }
+.audit-banner .audit-fix {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-1);
+  background: var(--bg-0); border: 1px solid var(--border); border-radius: 8px;
+  padding: 9px 11px; margin-top: 6px; overflow-x: auto;
+}
+.audit-banner .audit-fix code { white-space: nowrap; }
+.audit-pill {
+  display: inline-flex; align-items: center; font-size: 9.5px; font-weight: 800;
+  letter-spacing: 0.5px; padding: 2px 6px; border-radius: 4px; margin-left: 7px;
+  border: 1px solid; vertical-align: 1px; text-transform: uppercase;
+}
+.audit-pill.blind { background: rgba(232,72,63,0.14); border-color: rgba(232,72,63,0.45); color: var(--red-light); }
+.audit-pill.unknown { background: rgba(255,255,255,0.05); border-color: var(--border-bright); color: var(--text-2); }
+.selftest-tag {
+  font-size: 9.5px; font-weight: 800; letter-spacing: 0.5px; padding: 2px 6px;
+  border-radius: 4px; background: rgba(214,136,58,0.14); color: var(--amber);
+  border: 1px solid rgba(214,136,58,0.4); vertical-align: 1px; margin-left: 6px;
+}
+
+/* ---------- triage (detail pane) ---------- */
+.triage-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.triage-row select {
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; color: var(--text-0); font-size: 12.5px; font-family: inherit;
+}
+.triage-notes {
+  width: 100%; box-sizing: border-box; margin-top: 8px; min-height: 74px;
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; color: var(--text-0); font-size: 12.5px; font-family: inherit;
+  resize: vertical;
+}
+.triage-notes:focus, .triage-row select:focus { outline: none; border-color: var(--red); }
+.status-pill {
+  display: inline-flex; align-items: center; font-size: 10px; font-weight: 800;
+  letter-spacing: 0.5px; padding: 3px 8px; border-radius: 9999px; text-transform: uppercase;
+  border: 1px solid var(--border); color: var(--text-1); background: rgba(255,255,255,0.04);
+}
+.status-pill.investigating { background: rgba(214,136,58,0.14); border-color: rgba(214,136,58,0.4); color: var(--amber); }
+.status-pill.resolved { background: rgba(74,222,128,0.12); border-color: rgba(74,222,128,0.35); color: var(--green); }
+.status-pill.false-positive { background: rgba(255,255,255,0.05); border-color: var(--border-bright); color: var(--text-2); }
+a.mitre-link { color: var(--red-light); text-decoration: none; border-bottom: 1px dotted rgba(232,72,63,0.5); }
+a.mitre-link:hover { color: var(--red); border-bottom-style: solid; }
+.detail-desc .cov-key, .detail-note { font-size: 12px; color: var(--text-2); }
+.saved-flag { font-size: 11.5px; color: var(--green); font-weight: 700; }
 
 /* ---------- toolbar ---------- */
 .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
@@ -205,6 +302,10 @@ tbody tr.row-ack { opacity: 0.55; }
   <div class="topbar-right">
     <span class="last-check" id="lastCheck">Connecting…</span>
     <label class="toggle-wrap"><input type="checkbox" id="autoRefreshToggle" checked> Auto-refresh</label>
+    <button class="btn" id="selfTestBtn" title="Fire one synthetic event per rule family through the real rule engine">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      Self-test
+    </button>
     <button class="btn" id="refreshBtn">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
       Refresh
@@ -218,12 +319,47 @@ tbody tr.row-ack { opacity: 0.55; }
 
 <div class="wrap">
   <div class="stats">
+    <div class="stat neutral"><div class="num" id="statTotal">0</div><div class="label" id="statTotalLabel">Total</div></div>
     <div class="stat crit"><div class="num" id="statCritical">0</div><div class="label">Critical</div></div>
     <div class="stat high"><div class="num" id="statHigh">0</div><div class="label">High</div></div>
     <div class="stat med"><div class="num" id="statMedium">0</div><div class="label">Medium</div></div>
     <div class="stat low"><div class="num" id="statLow">0</div><div class="label">Low</div></div>
     <div class="stat neutral"><div class="num" id="statOpen">0</div><div class="label">Open</div></div>
     <div class="stat neutral"><div class="num" id="statAck">0</div><div class="label">Acknowledged</div></div>
+  </div>
+
+  <div class="coverage-panel">
+    <div class="coverage-bar" id="coverageBar">
+      <h2><span class="cov-caret">&#9656;</span> Detection coverage</h2>
+      <span class="cov-sum" id="coverageSummary">loading rule catalog…</span>
+    </div>
+    <div class="coverage-body" id="coverageBody">
+      <div class="cov-controls">
+        <input type="text" id="ruleSearch" placeholder="Search rules by name, MITRE technique, event ID or category…">
+        <div class="sev-filters" id="ruleSevFilters">
+          <button class="cov-btn active" data-rule-sev="all">All</button>
+          <button class="cov-btn" data-rule-sev="Critical">Critical</button>
+          <button class="cov-btn" data-rule-sev="High">High</button>
+          <button class="cov-btn" data-rule-sev="Medium">Medium</button>
+          <button class="cov-btn" data-rule-sev="Low">Low</button>
+        </div>
+        <button class="cov-btn" id="ruleFiredToggle">Fired only</button>
+        <button class="cov-btn" id="coverageExportBtn" title="Download the rule catalog with per-rule fired counts">Export coverage report</button>
+        <button class="cov-btn" id="preflightRefreshBtn" title="Re-run auditpol /get and re-check which rule families this host can actually log">Re-check audit policy</button>
+      </div>
+      <div class="audit-banner" id="auditBanner" style="display:none;"><div id="auditBannerBody"></div></div>
+      <div class="filter-info" id="ruleInfo"></div>
+      <div class="table-panel" style="margin-bottom:16px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Rule family</th><th>Severity</th><th>Event IDs</th><th>MITRE ATT&amp;CK</th><th>Category</th><th>Fired</th>
+            </tr>
+          </thead>
+          <tbody id="ruleRows"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <div class="toolbar">
@@ -238,6 +374,7 @@ tbody tr.row-ack { opacity: 0.55; }
       <button class="sev-filter-btn" data-sev-filter="Medium">Medium</button>
       <button class="sev-filter-btn" data-sev-filter="Low">Low</button>
     </div>
+    <button class="sev-filter-btn" id="selfTestToggle" title="[SELF-TEST] alerts are synthetic demo rows - kept out of the tiles by default">Self-test: hidden</button>
     <select id="statusFilter">
       <option value="all">All statuses</option>
       <option value="open">Open only</option>
