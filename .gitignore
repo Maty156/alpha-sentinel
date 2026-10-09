@@ -1,0 +1,8 @@
+# Runtime state AlphaSentinel writes next to the scripts - not source.
+sentinel-history.csv
+sentinel-state.json
+sentinel.pid
+collector-state.json
+
+# Replay reports (AlphaSentinel -ReplayPath writes <input>.alerts.csv)
+*.alerts.csv
