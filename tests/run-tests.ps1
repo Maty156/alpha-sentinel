@@ -147,6 +147,11 @@ try {
     $Script:ProcessedCount = 0
     $Script:Sessions = @{}
     $Script:LoginFailures = @{}
+    $Script:UsersStamp = $null
+    $Script:UsersUpdated = @{}
+    $Script:UsersRevoked = 0
+    $Script:BodyRejections = 0
+    $Script:LastPollCapped = $false
     $Script:LastCheck = (Get-Date).AddMinutes(-2)
     $script:Raised = @()
   }
@@ -784,6 +789,86 @@ try {
 
   Write-Host ""
   Write-Host "== v2.2 hardening: web DoS, catch-up, sessions, paging ==" -ForegroundColor Cyan
+
+  # --- request bodies are refused BEFORE they are read ----------------------
+  Assert-True ($Script:MaxLoginBodyBytes -eq 8192) 'the login route body budget is 8192 bytes'
+  Assert-True ($Script:MaxJsonBodyBytes -eq 65536) 'the general route body budget is 65536 bytes'
+
+  # a request context with a declared body length, like HttpListener hands us
+  function New-BodyContext([int64]$Length, $TransferEncoding = $null, [string]$Body = '') {
+    $stream = New-Object System.IO.MemoryStream
+    if ($Body) {
+      $bytes = [Text.Encoding]::UTF8.GetBytes($Body)
+      $stream.Write($bytes, 0, $bytes.Length)
+      $stream.Position = 0
+    }
+    $req = New-Object PSObject
+    $req | Add-Member -MemberType NoteProperty -Name ContentLength64 -Value $Length -Force
+    $req | Add-Member -MemberType NoteProperty -Name TransferEncoding -Value $TransferEncoding -Force
+    $req | Add-Member -MemberType NoteProperty -Name InputStream -Value $stream -Force
+    $req | Add-Member -MemberType NoteProperty -Name ContentEncoding -Value ([Text.Encoding]::UTF8) -Force
+    $ctx = New-Object PSObject
+    $ctx | Add-Member -MemberType NoteProperty -Name Request -Value $req -Force
+    return $ctx
+  }
+
+  Assert-True ($null -eq (Test-BodyAllowed (New-BodyContext 8192) $Script:MaxLoginBodyBytes)) 'a login body at exactly 8192 bytes is allowed'
+  Assert-True ((Test-BodyAllowed (New-BodyContext 8193) $Script:MaxLoginBodyBytes).Status -eq 413) 'a login body one byte over is refused with 413'
+  Assert-True ($null -eq (Test-BodyAllowed (New-BodyContext 65536) $Script:MaxJsonBodyBytes)) 'a triage body at the general limit is allowed'
+  Assert-True ((Test-BodyAllowed (New-BodyContext 65537) $Script:MaxJsonBodyBytes).Status -eq 413) 'a triage body over the general limit is refused with 413'
+  Assert-True ((Test-BodyAllowed (New-BodyContext -1)).Status -eq 411) 'a body with no Content-Length is refused with 411'
+  Assert-True ((Test-BodyAllowed (New-BodyContext 100 @('chunked'))).Status -eq 411) 'a chunked body is refused with 411 (its size is only knowable by reading it)'
+  Assert-True ($null -eq (Read-JsonBody (New-BodyContext 70000 $null '{"u":"aaaa"}'))) 'Read-JsonBody reads nothing at all when the body is over the limit'
+  Assert-True ($null -eq (Read-JsonBody (New-BodyContext 0))) 'an empty POST body is not an error (the drain path)'
+  Assert-True ((Read-JsonBody (New-BodyContext 12 $null '{"a":"bbbb"}')).a -eq 'bbbb') 'Read-JsonBody still parses a normal JSON body'
+
+  $web = Get-Section $raw $mWeb $mProbes
+  Assert-True ($web.Contains('Test-BodyAllowed $ctx $bodyLimit')) 'the handler checks the body budget before the route switch'
+  Assert-True ($web.Contains('$Script:BodyRejections++')) 'a refused body is counted'
+  Assert-True ($web.Contains('TimeoutManager.EntityBody')) 'the listener bounds how long a client may take to send a body'
+  Assert-True ($web.Contains('TimeoutManager.DrainEntityBody')) 'and how long we wait to drain one we did not read'
+  Assert-True ($web.Contains('Read-JsonBody $ctx $Script:MaxLoginBodyBytes')) 'the login route reads with the smaller budget'
+
+  # --- the public health probe leaks nothing; the counters moved behind auth --
+  $hStart = $web.IndexOf("'^/api/health" + [char]36)
+  $sStart = $web.IndexOf("'^/api/status" + [char]36)
+  Assert-True ($hStart -ge 0 -and $sStart -gt $hStart) 'the health and status routes both exist, health first'
+  $healthBlock = $web.Substring($hStart, $sStart - $hStart)
+  Assert-True ($healthBlock.Contains('{"ok":true}')) 'the health route answers exactly {"ok":true}'
+  Assert-True (-not ($healthBlock -match 'lagSeconds|evalErrors|alerts|uptimeSeconds|usersConfigured')) 'the health route carries no counters, lag or alert data'
+  Assert-True (-not ($healthBlock -match 'Get-|Where-Object')) 'and does no work beyond answering'
+  Assert-True ($web.Contains('catchingUpThreshold = $catch.threshold')) 'the status payload publishes the catch-up verdict'
+  Assert-True ($web.Contains('bodyRejections      = $Script:BodyRejections')) 'and the body-rejection counter'
+  Assert-True ($web.Contains('sessions            = @($Script:Sessions.Keys).Count')) 'and how many sessions are open'
+  Assert-True (-not $web.Contains('catchingUp       = ($lagMax -gt 2)')) 'the old lag > 2 catch-up test is gone from the server'
+
+  # --- an idle system is not "catching up" (dashboard mirrors the rule) ------
+  $savedPollSeconds = $PollSeconds
+  $PollSeconds = 15
+  $Script:LastPollCapped = $false
+  $c = Get-CatchUpState 20
+  Assert-True (-not $c.catchingUp) 'idle: one poll interval of lag (20s on a 15s poll) is NOT catching up'
+  Assert-True ($c.threshold -eq 35) 'the threshold is two poll intervals plus the 5s overlap (35s)'
+  Assert-True (-not (Get-CatchUpState 34).catchingUp) 'lag just under the threshold is still idle'
+  Assert-True ((Get-CatchUpState 36).catchingUp) 'lag past the threshold IS catching up'
+  $Script:LastPollCapped = $true
+  Assert-True ((Get-CatchUpState 5).catchingUp) 'a poll that had to defer events is catching up whatever the lag'
+  Assert-True ((Get-CatchUpState 5).capped) 'and the verdict reports the capped flag'
+  $Script:LastPollCapped = $false
+
+  Reset-Engine
+  foreach ($source in $LogSources) { $Script:ChannelMarks[$source.Log] = (Get-Date).AddMinutes(-2) }
+  $script:FakeEvents = @()
+  $null = Invoke-PollOnce
+  Assert-True (-not $Script:LastPollCapped) 'a poll that deferred nothing clears the capped flag'
+  Assert-True (-not (Get-CatchUpState 20).catchingUp) 'so the tool reads as idle despite a poll interval of lag'
+
+  $js = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'dashboard.js')
+  Assert-True ($js.Contains('function isCatchingUp')) 'dashboard.js has the shared catch-up rule'
+  Assert-True ($js.Contains("api('/status')")) 'the dashboard reads the authenticated /api/status, not the bare probe'
+  Assert-True (-not $js.Contains('lag > 2')) 'the old lag > 2 pill test is gone from the dashboard'
+  Assert-True ($js.Contains('(poll * 2) + 5')) 'and the JS threshold is the same formula as the server'
+  $PollSeconds = $savedPollSeconds
 
   # --- PBKDF2 is built with New-Object and is really PBKDF2-HMAC-SHA1 -------
   $salt6070 = [byte[]]@(0x73, 0x61, 0x6c, 0x74)

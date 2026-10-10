@@ -805,13 +805,58 @@ function New-Alert($ruleKey, $description, $severityOverride, $fields, $dedupeKe
   return $alert
 }
 
-# Reads and parses a JSON request body (the dashboard's triage save posts one).
-# Returns $null when the body is absent or not JSON, so callers can treat that
-# as "leave the existing values alone". Endpoints that do not need one still
-# call this to DRAIN the stream - a POST body left unread on a keep-alive
-# connection can make HttpListener reject the next request on that socket.
-function Read-JsonBody($ctx) {
+# ---- request body limits (web DoS guard) ----------------------------------
+# A POST body is attacker-controlled and this server is SINGLE-THREADED, so an
+# unbounded read is a denial of service: one client can hold the only thread
+# while it dribbles a body in. The login route carries a username and a
+# password, so it gets a much smaller budget than the triage routes.
+$Script:MaxLoginBodyBytes = 8192
+$Script:MaxJsonBodyBytes  = 65536
+$Script:BodyRejections = 0
+
+# Decides whether a request body may be read AT ALL, without reading it.
+# Returns $null when it may, or @{ Status; Message } when the request must be
+# refused:
+#   411 - no Content-Length, or a Transfer-Encoding (chunked) body. A chunked
+#         body's size is only knowable by reading it, which is the attack.
+#   413 - the declared length is over the endpoint's budget.
+function Test-BodyAllowed($ctx, [int]$MaxBytes) {
   try {
+    $te = $null
+    try { $te = $ctx.Request.TransferEncoding } catch { }
+    if ($te -and @($te).Count -gt 0) {
+      return @{ Status = 411; Message = 'A request body with an unknown length (Transfer-Encoding) is not accepted.' }
+    }
+    $declared = [int64]$ctx.Request.ContentLength64
+    if ($declared -lt 0) {
+      return @{ Status = 411; Message = 'Content-Length is required.' }
+    }
+    if ($declared -gt $MaxBytes) {
+      return @{ Status = 413; Message = ('Request body too large (limit ' + $MaxBytes + ' bytes).') }
+    }
+  } catch {
+    return @{ Status = 411; Message = 'Content-Length could not be determined.' }
+  }
+  return $null
+}
+
+# Reads and parses a JSON request body (the dashboard's triage save posts one).
+# Returns $null when the body is absent, oversized or not JSON, so callers can
+# treat that as "leave the existing values alone". Endpoints that do not need a
+# body still call this to DRAIN the stream - a POST body left unread on a
+# keep-alive connection can make HttpListener reject the next request on that
+# socket.
+#
+# The size is checked again here BEFORE a single byte is read, so a caller that
+# forgets the guard in Invoke-Handler still cannot be made to read a huge body.
+# Turning Test-BodyAllowed's verdict into a 411/413 response is the caller's job;
+# this function simply refuses to read.
+function Read-JsonBody($ctx, [int]$MaxBytes = 0) {
+  if ($MaxBytes -le 0) { $MaxBytes = $Script:MaxJsonBodyBytes }
+  try {
+    if (Test-BodyAllowed $ctx $MaxBytes) { return $null }
+    $declared = [int64]$ctx.Request.ContentLength64
+    if ($declared -eq 0) { return $null }
     $reader = New-Object System.IO.StreamReader($ctx.Request.InputStream, $ctx.Request.ContentEncoding)
     $text = $reader.ReadToEnd()
     $reader.Close()
@@ -2098,6 +2143,16 @@ function Start-WebServer {
   }
   $prefix = "http://" + $prefixHost + ":$Port/"
   $listener.Prefixes.Add($prefix)
+  # Web DoS bounds. The defaults are two minutes, which on a SINGLE-THREADED
+  # server means one stalled client can hold the only thread: EntityBody caps how
+  # long a client may take to send a request body, DrainEntityBody caps how long
+  # we wait to finish draining one we did not read, and HeaderWait bounds a client
+  # that opens a connection and never finishes its headers (slowloris).
+  try {
+    $listener.TimeoutManager.EntityBody = [timespan]::FromSeconds(5)
+    $listener.TimeoutManager.DrainEntityBody = [timespan]::FromSeconds(5)
+    $listener.TimeoutManager.HeaderWait = [timespan]::FromSeconds(10)
+  } catch { }
   try {
     $listener.Start()
   } catch {
@@ -2110,8 +2165,8 @@ function Start-WebServer {
   }
   Write-Host ("  [web] dashboard listening on " + $prefix) -ForegroundColor Green
   if ($prefixHost -eq '+') {
-    Write-Host "  [web] WARNING: bound to every interface. Any host on the network can reach the dashboard;" -ForegroundColor Yellow
-    Write-Host "  [web]          they still need the API token printed below." -ForegroundColor Yellow
+    Write-Host "  [web] WARNING: bound to every interface. Any host on the network can reach the login page;" -ForegroundColor Yellow
+    Write-Host "  [web]          they need an account in sentinel-users.json to get any further." -ForegroundColor Yellow
   }
   return $listener
 }
@@ -2166,6 +2221,21 @@ function Invoke-Handler($ctx) {
       }
     }
 
+    # ---- request body guard, BEFORE anything is read. A POST must declare a
+    # ---- Content-Length and it must fit the endpoint's budget; a chunked or
+    # ---- length-less body is refused with 411 because its size is only
+    # ---- knowable by reading it, which is the DoS this prevents.
+    if ($isApi -and $method -eq 'POST') {
+      $bodyLimit = $Script:MaxJsonBodyBytes
+      if ($path -eq '/api/login') { $bodyLimit = $Script:MaxLoginBodyBytes }
+      $bodyReject = Test-BodyAllowed $ctx $bodyLimit
+      if ($bodyReject) {
+        $Script:BodyRejections++
+        Send-Json $res ('{"error":"' + $bodyReject.Message + '"}') $bodyReject.Status
+        return
+      }
+    }
+
     # ---- state-changing routes are POST-only and same-origin
     if ($path -match '^/api/alerts/\d+/(ack|unack|status)$' -or $path -eq '/api/self-test' -or $path -eq '/api/preflight/refresh' -or $path -eq '/api/logout') {
       if ($method -ne 'POST') {
@@ -2209,7 +2279,7 @@ function Invoke-Handler($ctx) {
           return
         }
 
-        $body = Read-JsonBody $ctx
+        $body = Read-JsonBody $ctx $Script:MaxLoginBodyBytes
         $userName = ''
         $password = ''
         if ($body) {
@@ -2255,9 +2325,15 @@ function Invoke-Handler($ctx) {
         } | ConvertTo-Json)
       }
       '^/api/health$' {
-        # Deliberately contains NO alert content (no titles, accounts, rules or
-        # descriptions) so it can stay unauthenticated for monitoring probes:
-        # counts, lag and error counters only.
+        # A liveness probe, nothing more: no counters, no channel names, no
+        # timings, no version. Everything an operator or a dashboard needs is on
+        # the authenticated /api/status below, so an unauthenticated caller
+        # learns only that something is listening.
+        Send-Json $res '{"ok":true}'
+      }
+      '^/api/status$' {
+        # Authenticated (it is not in the public list above). This is what the
+        # dashboard reads: counts, per-channel lag and error counters.
         $nonSelfTest = @($Script:Alerts | Where-Object { -not $_.SelfTest }).Count
         $now = Get-Date
         $channels = @()
@@ -2277,25 +2353,30 @@ function Invoke-Handler($ctx) {
         }
         $uptime = 0
         if ($Script:StartedAt) { $uptime = [int][Math]::Round(($now - $Script:StartedAt).TotalSeconds) }
+        $catch = Get-CatchUpState $lagMax
         Send-Json $res (@{
-          ok               = $true
-          alerts           = $nonSelfTest
-          selfTestAlerts   = $Script:SelfTestAlerts
-          rules            = $RuleMeta.Count
-          usersConfigured  = @(Get-UserStore | ForEach-Object { $_.users }).Count
-          pollSeconds      = $PollSeconds
-          lagSeconds       = $lagMax
-          catchingUp       = ($lagMax -gt 2)
-          lagWarning       = ($lagMax -gt 120)
-          evalErrors       = $Script:EvalErrors
-          pollErrors       = $Script:PollErrors
-          lastEvalError    = "$($Script:LastEvalError)"
-          lastPollError    = "$($Script:LastPollError)"
-          channels         = $channels
-          forwarded        = $Script:Forwarded
-          forwardingErrors = $Script:ForwardFailures
-          auditBlind       = @(Get-RuleCatalog | Where-Object { $_.auditState -eq 'blind' }).Count
-          uptimeSeconds    = $uptime
+          ok                  = $true
+          alerts              = $nonSelfTest
+          selfTestAlerts      = $Script:SelfTestAlerts
+          rules               = $RuleMeta.Count
+          usersConfigured     = @(Get-UserStore | ForEach-Object { $_.users }).Count
+          sessions            = @($Script:Sessions.Keys).Count
+          pollSeconds         = $PollSeconds
+          lagSeconds          = $lagMax
+          catchingUp          = $catch.catchingUp
+          catchingUpThreshold = $catch.threshold
+          lastPollCapped      = $catch.capped
+          lagWarning          = ($lagMax -gt 120)
+          evalErrors          = $Script:EvalErrors
+          pollErrors          = $Script:PollErrors
+          bodyRejections      = $Script:BodyRejections
+          lastEvalError       = "$($Script:LastEvalError)"
+          lastPollError       = "$($Script:LastPollError)"
+          channels            = $channels
+          forwarded           = $Script:Forwarded
+          forwardingErrors    = $Script:ForwardFailures
+          auditBlind          = @(Get-RuleCatalog | Where-Object { $_.auditState -eq 'blind' }).Count
+          uptimeSeconds       = $uptime
         } | ConvertTo-Json -Depth 4)
       }
       '^/api/alerts$' {
@@ -2656,6 +2737,25 @@ function Get-PollLagSeconds {
   if ($Script:ChannelMarks.Count -eq 0) { return 0 }
   $oldest = ($Script:ChannelMarks.Values | Sort-Object)[0]
   return [int][Math]::Round(((Get-Date) - $oldest).TotalSeconds)
+}
+
+# ---- what "catching up" actually means -------------------------------------
+# An IDLE system carries lag by design. It polls every -PollSeconds, and the
+# watermark is deliberately backdated 5s for overlap, so the lag cycles between
+# roughly 5s and one poll interval + 5s while nothing is wrong. The old
+# "lag > 2 seconds" test therefore called a perfectly healthy idle monitor
+# "catching up" for its whole life. A real backlog is either:
+#   * a poll that had to defer events, or
+#   * lag past two whole poll intervals plus the overlap margin.
+# dashboard.js mirrors the rule (and prefers the server's verdict when present).
+function Get-CatchUpState([int]$LagSeconds) {
+  $threshold = ($PollSeconds * 2) + 5
+  $capped = [bool]$Script:LastPollCapped
+  return [PSCustomObject]@{
+    catchingUp = ($capped -or ($LagSeconds -gt $threshold))
+    capped     = $capped
+    threshold  = $threshold
+  }
 }
 
 # 200 ms catch-up instead of a whole -PollSeconds when a poll had to defer

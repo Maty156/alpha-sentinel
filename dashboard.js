@@ -393,14 +393,32 @@ async function loadSession() {
 // rather than buried in an endpoint.
 let healthState = null;
 
+// Same rule as the server's Get-CatchUpState. An IDLE monitor carries lag by
+// design - it polls every `pollSeconds`, and the watermark is deliberately
+// backdated 5s for overlap - so the old two-second lag test reported a perfectly
+// healthy idle system as "catching up" forever. Real catch-up means the server had to
+// defer events, or the lag has passed two whole poll intervals plus the overlap.
+// The server sends the verdict; the fallback mirrors the formula for an older
+// payload.
+function catchUpThreshold(health) {
+  const poll = health.pollSeconds || 15;
+  return (poll * 2) + 5;
+}
+
+function isCatchingUp(health) {
+  if (typeof health.catchingUp === 'boolean') return health.catchingUp;
+  return (health.lagSeconds || 0) > catchUpThreshold(health);
+}
+
 function renderHealth() {
   const pill = document.getElementById('healthPill');
   if (!pill || !healthState) return;
   const lag = healthState.lagSeconds || 0;
   const evalErrors = healthState.evalErrors || 0;
   const pollErrors = healthState.pollErrors || 0;
+  const catchingUp = isCatchingUp(healthState);
   const parts = [];
-  if (lag > 2) parts.push(`catching up: ${lag}s behind`);
+  if (catchingUp) parts.push(`catching up: ${lag}s behind`);
   if (evalErrors > 0) parts.push(`${evalErrors} event(s) skipped (malformed)`);
   if (pollErrors > 0) parts.push(`${pollErrors} failed log read(s)`);
   if (!parts.length) {
@@ -411,12 +429,17 @@ function renderHealth() {
     pill.className = 'health-pill ' + ((lag > 120 || pollErrors > 0) ? 'danger' : 'warn');
   }
   pill.style.display = 'inline-flex';
-  pill.title = `oldest channel ${lag}s behind - evalErrors ${evalErrors} - pollErrors ${pollErrors}`;
+  pill.title = `oldest channel ${lag}s behind (catching up past ${catchUpThreshold(healthState)}s`
+    + `${healthState.lastPollCapped ? ', or any deferred poll' : ''}) - `
+    + `evalErrors ${evalErrors} - pollErrors ${pollErrors}`;
 }
 
 async function refreshHealth() {
   try {
-    healthState = await api('/health');
+    // /api/status, not /api/health: the health probe now answers only
+    // {"ok":true} so an unauthenticated caller learns nothing but that the port
+    // is open. The counters live on the authenticated status route.
+    healthState = await api('/status');
     renderHealth();
   } catch (err) {
     // best effort: the alert feed is what matters
