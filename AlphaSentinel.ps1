@@ -1799,8 +1799,16 @@ $Script:LoginWindowMinutes = 5  # ... inside this window, before ...
 $Script:LoginBlockMinutes = 5   # ... the IP is blocked for this long
 $Script:Pbkdf2Iterations = 150000
 
-$Script:Sessions = @{}          # sessionId -> @{ User; Created; LastSeen }
+$Script:Sessions = @{}          # sessionId -> @{ User; Created; LastSeen; UserStamp }
 $Script:LoginFailures = @{}     # ip -> @{ Count; First; BlockedUntil }
+
+# Users-file fingerprint. The account store is edited out-of-band by
+# New-SentinelAdmin.ps1, so a live session has to be re-checked against it: a
+# session must not outlive its account, and a password reset must invalidate the
+# sessions that were opened with the old password.
+$Script:UsersStamp = $null      # last seen LastWriteTimeUtc of the users file
+$Script:UsersUpdated = @{}      # user -> its 'updated' timestamp
+$Script:UsersRevoked = 0        # sessions ended because the account changed
 
 function ConvertTo-Hex([byte[]]$Bytes) {
   return (($Bytes | ForEach-Object { $_.ToString('x2') }) -join '')
@@ -1922,14 +1930,76 @@ function New-SessionId {
 function New-Session([string]$UserName) {
   $id = New-SessionId
   $now = Get-Date
-  $Script:Sessions[$id] = [PSCustomObject]@{ User = $UserName; Created = $now; LastSeen = $now }
+  $null = Update-UsersFingerprint
+  $stamp = ''
+  if ($Script:UsersUpdated.ContainsKey($UserName)) { $stamp = "$($Script:UsersUpdated[$UserName])" }
+  # UserStamp is the account revision this session was opened against, so a later
+  # -Reset (which rewrites 'updated') is detectable and ends the session
+  $Script:Sessions[$id] = [PSCustomObject]@{ User = $UserName; Created = $now; LastSeen = $now; UserStamp = $stamp }
   return $id
+}
+
+# Re-reads the users file only when its mtime moved. Returns $true when the
+# fingerprint changed, so the caller knows to re-check the sessions.
+function Update-UsersFingerprint {
+  try {
+    if (-not (Test-Path $UsersFile)) {
+      if ($null -ne $Script:UsersStamp) {
+        $Script:UsersStamp = $null
+        $Script:UsersUpdated = @{}
+        return $true
+      }
+      return $false
+    }
+    $stamp = "$UsersFile|" + (Get-Item -Path $UsersFile).LastWriteTimeUtc.Ticks
+    if ($null -ne $Script:UsersStamp -and $stamp -eq $Script:UsersStamp) { return $false }
+    $store = Get-UserStore
+    $map = @{}
+    if ($store -and $store.users) {
+      foreach ($u in @($store.users)) { $map["$($u.user)"] = "$($u.updated)" }
+    }
+    $Script:UsersStamp = $stamp
+    $Script:UsersUpdated = $map
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+# Ends every session whose account is gone from sentinel-users.json or whose
+# record was rewritten (-Reset changes 'updated'). A session with no stamp is
+# ended too: it can only predate this check, and fail-closed is the right way to
+# be wrong about whether a credential is still valid.
+function Revoke-StaleSessions {
+  if (-not (Update-UsersFingerprint)) { return 0 }
+  $dropped = 0
+  foreach ($id in @($Script:Sessions.Keys)) {
+    $s = $Script:Sessions[$id]
+    $user = "$($s.User)"
+    if (-not $Script:UsersUpdated.ContainsKey($user)) {
+      $Script:Sessions.Remove($id)
+      $dropped++
+      continue
+    }
+    if ("$($s.UserStamp)" -ne "$($Script:UsersUpdated[$user])") {
+      $Script:Sessions.Remove($id)
+      $dropped++
+    }
+  }
+  if ($dropped -gt 0) {
+    $Script:UsersRevoked += $dropped
+    Write-Host ("  [auth] " + $dropped + " session(s) ended because the account store changed.") -ForegroundColor DarkYellow
+  }
+  return $dropped
 }
 
 # Returns the session record and refreshes its idle timer, or $null when it is
 # unknown, past its 8h absolute lifetime, or idle for more than 30 minutes.
 function Get-Session([string]$SessionId) {
   if (-not $SessionId) { return $null }
+  # An account edit (New-SentinelAdmin -Remove / -Reset) must take effect on the
+  # very next request, not at the next restart.
+  $null = Revoke-StaleSessions
   if (-not $Script:Sessions.ContainsKey($SessionId)) { return $null }
   $s = $Script:Sessions[$SessionId]
   $now = Get-Date
@@ -2849,11 +2919,20 @@ function Get-ChannelFilterXml($channel, $ids, $since) {
 # If the provider rejects the XPath (it can, on a differently-patched DC) the
 # channel falls back to the plain Id filter and remembers, so the failing query
 # is not paid for on every poll.
-function Get-ChannelEvents($channel, $ids, $since) {
+function Get-ChannelEvents($channel, $ids, $since, $cap = 0) {
+  # Read OLDEST-first and only one page (cap + 1) per poll, so a poll reads what
+  # it is going to process instead of materialising a whole backlog every time.
+  # The +1 is how a full page is recognised: cap+1 results means there is more.
+  $max = 0
+  if ($cap -gt 0) { $max = $cap + 1 }
   if (-not $Script:XPathFallback[$channel]) {
     try {
       $filterXml = Get-ChannelFilterXml $channel $ids $since
-      $events = @(Get-WinEvent -FilterXml $filterXml -ErrorAction Stop)
+      if ($max -gt 0) {
+        $events = @(Get-WinEvent -FilterXml $filterXml -Oldest -MaxEvents $max -ErrorAction Stop)
+      } else {
+        $events = @(Get-WinEvent -FilterXml $filterXml -ErrorAction Stop)
+      }
       return @{ Events = $events; UsedXPath = $true }
     } catch {
       $Script:XPathFallback[$channel] = $true
@@ -2861,7 +2940,11 @@ function Get-ChannelEvents($channel, $ids, $since) {
       Write-Host ("  [poll] " + $channel + ": XPath pre-filter not accepted - using the plain Id filter from now on.") -ForegroundColor DarkYellow
     }
   }
-  $events = @(Get-WinEvent -FilterHashtable @{ LogName = $channel; Id = $ids; StartTime = $since } -ErrorAction Stop)
+  if ($max -gt 0) {
+    $events = @(Get-WinEvent -FilterHashtable @{ LogName = $channel; Id = $ids; StartTime = $since } -Oldest -MaxEvents $max -ErrorAction Stop)
+  } else {
+    $events = @(Get-WinEvent -FilterHashtable @{ LogName = $channel; Id = $ids; StartTime = $since } -ErrorAction Stop)
+  }
   return @{ Events = $events; UsedXPath = $false }
 }
 
@@ -2937,7 +3020,7 @@ function Invoke-PollOnce {
     $channel = $source.Log
     $since = Get-ChannelMark $channel
     try {
-      $query = Get-ChannelEvents $channel $source.Ids $since
+      $query = Get-ChannelEvents $channel $source.Ids $since $MaxEventsPerPoll
       $batch = Invoke-ChannelBatch $channel $query.Events $MaxEventsPerPoll
 
       # The query AND the processing both completed, so the mark may move.
@@ -2946,7 +3029,11 @@ function Invoke-PollOnce {
         if ($mark -lt $since) { $mark = $since }
         $anyCapped = $true
       } else {
-        $mark = $pollStart
+        # Backdate by 5s. An event can be written after the query took its
+        # snapshot but before $pollStart was taken, and would then sit outside
+        # every window. The seen-record ring drops what the overlap re-reads, so
+        # the overlap costs nothing but closes that hole.
+        $mark = $pollStart.AddSeconds(-5)
       }
       Set-ChannelMark $channel $mark
       $Script:ChannelLastSuccess[$channel] = $pollStart
@@ -2955,7 +3042,7 @@ function Invoke-PollOnce {
       $evaluatedTotal += $batch.Evaluated
 
       if ($batch.Capped) {
-        Write-Host ("  [poll] " + $channel + ": " + $batch.Deferred + " event(s) over the " + $MaxEventsPerPoll + "-per-poll cap - catching up.") -ForegroundColor DarkYellow
+        Write-Host ("  [poll] " + $channel + ": page limit reached (" + $MaxEventsPerPoll + " events) with more waiting - catching up.") -ForegroundColor DarkYellow
       }
       if ($batch.Errors -gt 0) {
         Write-Host ("  [poll] " + $channel + ": " + $batch.Errors + " event(s) failed to evaluate and were skipped (see /api/health evalErrors).") -ForegroundColor DarkYellow
@@ -2971,6 +3058,8 @@ function Invoke-PollOnce {
     }
   }
 
+  # Remembered for /api/status: a capped poll IS "catching up", regardless of lag.
+  $Script:LastPollCapped = $anyCapped
   $Script:LagSeconds = Get-PollLagSeconds
   if ($Script:LagSeconds -gt 120) {
     if (-not $Script:LagWarned) {

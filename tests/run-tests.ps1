@@ -18,6 +18,10 @@ Covered:
   7. backlog catch-up: a 5000-event backlog drains without loss or duplicates
   8. the XPath pre-filter: well-formed, a superset of what the engine needs,
      and the fallback when the provider rejects it
+  9. v2.2 hardening: the request-body DoS guard (411/413 before any read), the
+     idle-vs-catching-up verdict, sessions ending with their account, the
+     public-health/authenticated-status split, the 5s watermark overlap, paged
+     oldest-first polls, and New-Object PBKDF2 pinned to RFC 6070 vectors
   9. fixture replay against tests/fixtures/expected.json
 
     .\tests\run-tests.ps1
@@ -203,10 +207,11 @@ try {
   $script:FakeFailChannels = @()
   $script:FakeFailXml = $false
   $script:FakeCalls = @()
+  $script:FakeParams = @()
 
   function Get-WinEvent {
     [CmdletBinding()]
-    param([hashtable]$FilterHashtable, [string]$FilterXml)
+    param([hashtable]$FilterHashtable, [string]$FilterXml, [switch]$Oldest, [int]$MaxEvents = 0)
     $kind = if ($FilterXml) { 'FilterXml' } else { 'FilterHashtable' }
     $script:FakeCalls += $kind
     # the XPath path carries the channel and the time window inside the XML, so
@@ -218,6 +223,7 @@ try {
       if ($FilterXml -match 'Path="([^"]+)"') { $channel = "$($Matches[1])" }
       if ($FilterXml -match "SystemTime&gt;='([^']+)'") { $sinceFromXml = [datetime]$Matches[1] }
     }
+    $script:FakeParams += [PSCustomObject]@{ Kind = $kind; Channel = $channel; Oldest = [bool]$Oldest; MaxEvents = $MaxEvents }
     if ($script:FakeFailXml -and $kind -eq 'FilterXml') { throw "fake provider rejected the XPath" }
     if ($channel -and ($script:FakeFailChannels -contains $channel)) { throw "fake log '$channel' unavailable" }
 
@@ -233,8 +239,12 @@ try {
       if ($ids.Count -gt 0 -and ($ids -notcontains [int]$e.Id)) { continue }
       $matches += $e
     }
-    # the real Get-WinEvent hands back newest-first
-    return @($matches | Sort-Object TimeCreated -Descending)
+    # the real Get-WinEvent hands back newest-first unless -Oldest is given, and
+    # -MaxEvents takes the first N of whichever order was asked for
+    if ($Oldest) { $ordered = @($matches | Sort-Object TimeCreated) }
+    else { $ordered = @($matches | Sort-Object TimeCreated -Descending) }
+    if ($MaxEvents -gt 0) { $ordered = @($ordered | Select-Object -First $MaxEvents) }
+    return $ordered
   }
 
   Write-Host ""
@@ -655,8 +665,9 @@ try {
   $poll2 = Invoke-PollOnce
   Assert-True ($poll2.Ok) 'a complete poll reports success'
   Assert-True ($poll2.Alerts -eq 1) 'the event in the window was evaluated and alerted'
-  Assert-True ($Script:ChannelMarks['Security'] -gt (Get-Date).AddMinutes(-1)) 'a non-capped channel moves its watermark to the poll start'
-  Assert-True ($poll2.Lag -lt 5) 'lag is near zero after a successful poll'
+  Assert-True ($Script:ChannelMarks['Security'] -gt (Get-Date).AddMinutes(-1)) 'a non-capped channel moves its watermark up to the poll start (minus the 5s overlap)'
+  Assert-True ($Script:LastPollCapped -eq $false) 'a complete poll leaves the capped flag clear'
+  Assert-True ($poll2.Lag -le 6) 'lag is the deliberate 5s overlap after a successful poll, and nothing more'
   Assert-True ($script:FakeCalls -contains 'FilterXml') 'the XPath pre-filter is used first'
 
   Write-Host ""
@@ -869,6 +880,90 @@ try {
   Assert-True (-not $js.Contains('lag > 2')) 'the old lag > 2 pill test is gone from the dashboard'
   Assert-True ($js.Contains('(poll * 2) + 5')) 'and the JS threshold is the same formula as the server'
   $PollSeconds = $savedPollSeconds
+
+  # --- a session dies with its account --------------------------------------
+  Reset-Engine
+  $live = New-Session 'maty'
+  Assert-True ($null -ne (Get-Session $live)) 'a session opened against the current users file is live'
+  Assert-True ("$($Script:Sessions[$live].UserStamp)".Length -gt 0) 'the session records the account revision it was opened against'
+
+  Start-Sleep -Milliseconds 30
+  $same = Get-Content -Raw $UsersFile
+  $same | Set-Content -Path $UsersFile -Encoding UTF8
+  Assert-True ($null -ne (Get-Session $live)) 'rewriting the file with unchanged records does not end the session'
+
+  Start-Sleep -Milliseconds 30
+  $reset = $same -replace '2026-03-04T09:00:00\.0000000Z', '2026-03-05T11:22:33.0000000Z'
+  $reset | Set-Content -Path $UsersFile -Encoding UTF8
+  Assert-True ($null -eq (Get-Session $live)) 'a -Reset (record rewritten, new updated stamp) ends the existing session'
+  Assert-True (-not $Script:Sessions.ContainsKey($live)) 'the session is dropped, not merely refused'
+  Assert-True ($Script:UsersRevoked -ge 1) 'and the revocation is counted'
+
+  $fresh = New-Session 'admin'
+  Assert-True ($null -ne (Get-Session $fresh)) 'an account whose record was untouched survives the same file change'
+
+  Start-Sleep -Milliseconds 30
+  $fmaty = New-Session 'maty'
+  Assert-True ($null -ne (Get-Session $fmaty)) 'a session opened after the reset is live'
+  $null = Update-UsersFingerprint
+  $adminStamp = "$($Script:UsersUpdated['admin'])"
+  $onlyAdmin = @{ version = 1; users = @([PSCustomObject]@{
+    user = 'admin'; salt = 'aabb'; hash = 'ccdd'; iterations = 150000
+    created = '2026-03-04T09:05:00.0000000Z'; updated = $adminStamp }) } | ConvertTo-Json -Depth 5
+  Start-Sleep -Milliseconds 30
+  $onlyAdmin | Set-Content -Path $UsersFile -Encoding UTF8
+  Assert-True ($null -eq (Get-Session $fmaty)) 'removing the account from the store (-Remove) ends its session'
+  Assert-True (-not $Script:Sessions.ContainsKey($fmaty)) 'and that session is dropped too'
+  $same | Set-Content -Path $UsersFile -Encoding UTF8
+  Assert-True ((Get-Content -Raw $Script).Contains('$null = Revoke-StaleSessions')) 'Get-Session re-checks the account store on every call'
+
+  # --- the watermark overlaps by 5s and the overlap is not double-counted ---
+  Reset-Engine
+  foreach ($source in $LogSources) { $Script:ChannelMarks[$source.Log] = (Get-Date).AddMinutes(-2) }
+  $script:FakeEvents = @(New-FakeEvent 4720 910100 (Get-Date) @{ TargetUserName = 'overlapUser'; SubjectUserName = 'administrator' })
+  $before = Get-Date
+  $o1 = Invoke-PollOnce
+  $mark = Get-ChannelMark 'Security'
+  Assert-True ($o1.Alerts -eq 1) 'the event alerts on the first poll'
+  Assert-True ($mark -lt $before.AddSeconds(-3)) 'an uncapped poll backdates the watermark by about 5s'
+  Assert-True ($mark -gt $before.AddSeconds(-8)) 'and by no more than that'
+  $o2 = Invoke-PollOnce
+  Assert-True ($o2.Evaluated -eq 0) 'the overlap re-read is dropped by the seen-record ring'
+  Assert-True ($o2.Alerts -eq 0) 'so the overlap raises no duplicate alert'
+
+  # --- a capped poll reads only what it is going to process ----------------
+  Reset-Engine
+  foreach ($source in $LogSources) { $Script:ChannelMarks[$source.Log] = (Get-Date).AddMinutes(-30) }
+  $page = New-Object System.Collections.ArrayList
+  $pageBase = (Get-Date).AddMinutes(-25)
+  for ($i = 0; $i -lt 1200; $i++) {
+    [void]$page.Add((New-FakeEvent 4720 (930000 + $i) $pageBase.AddMilliseconds($i * 10) @{ TargetUserName = "page$i"; SubjectUserName = 'administrator' }))
+  }
+  $script:FakeEvents = @($page)
+  $script:FakeParams = @()
+  $p1 = Invoke-PollOnce
+  $p1sec = @($script:FakeParams | Where-Object { $_.Channel -eq 'Security' })
+  Assert-True ($p1sec.Count -ge 1) 'the Security channel queried the provider'
+  Assert-True ($p1sec[0].MaxEvents -eq ($MaxEventsPerPoll + 1)) 'a capped poll asks the provider for exactly cap+1 events'
+  Assert-True ($p1sec[0].Oldest) 'and asks for them oldest-first'
+  Assert-True ($p1.Capped) 'the poll reports that it was capped'
+  Assert-True ($p1.Evaluated -eq $MaxEventsPerPoll) 'and processed exactly one page, not the whole backlog'
+  $markAfter1 = Get-ChannelMark 'Security'
+  $p2 = Invoke-PollOnce
+  Assert-True ($p2.Evaluated -ge ($MaxEventsPerPoll - 1)) 'the next poll reads the following page (the one event on the window boundary is deduped by the seen-record ring)'
+  Assert-True ($p2.Capped) 'and it is still capped, because 1200 events do not fit in one page'
+  Assert-True ((Get-ChannelMark 'Security') -gt $markAfter1) 'and the watermark advanced with it'
+  Assert-True (@($script:FakeParams | Where-Object { $_.Channel -eq 'Security' -and $_.Oldest }).Count -ge 2) 'every windowed query asked for the oldest events, not the newest'
+
+  # drain the rest: paging must not lose an event or alert twice across a boundary
+  $guard = 0
+  while ($guard -lt 10) {
+    $pn = Invoke-PollOnce
+    $guard++
+    if (-not $pn.Capped) { break }
+  }
+  Assert-True ($guard -le 4) ('the whole 1200-event backlog drains in a few pages (actual ' + $guard + ' more poll(s))')
+  Assert-True (@($Script:Alerts | Where-Object { $_.RuleKey -eq 'account_created' }).Count -eq 1200) 'all 1200 events alerted exactly once: nothing lost and nothing duplicated across page boundaries'
 
   # --- PBKDF2 is built with New-Object and is really PBKDF2-HMAC-SHA1 -------
   $salt6070 = [byte[]]@(0x73, 0x61, 0x6c, 0x74)
