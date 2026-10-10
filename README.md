@@ -1,4 +1,4 @@
-# ALPHA Sentinel v2.2 - AD / Network Attack Monitor (background service + web dashboard)
+﻿# ALPHA Sentinel v2.2 - AD / Network Attack Monitor (background service + web dashboard)
 
 A standalone Windows security-monitoring tool from the **Alpha Cybersecurity**
 graduation project - **Wazuh's agent + dashboard model as ONE zero-dependency
@@ -146,9 +146,18 @@ with the page. That is replaced by a real login:
   The dashboard header shows *signed in as &lt;user&gt;* and a Logout button, and any
   401 sends the browser back to the sign-in page.
 - **Every `/api/*` route except `/api/health` and `POST /api/login` answers 401
-  JSON** without a live session. `/api/health` stays open for monitoring probes
-  and deliberately carries counters only - no titles, accounts, rules or
-  descriptions.
+  JSON** without a live session. `/api/health` stays open for monitoring probes and
+  now answers a bare `{"ok":true}` - nothing else at all - so an unauthenticated
+  caller learns only that the port is open. Counters, lag, session count and error
+  tallies live on the authenticated **`/api/status`**, which is what the dashboard
+  reads.
+- **Request bodies are bounded and refused before they are read.** The login route
+  takes at most 8192 bytes and every other route 65536; a body with no
+  `Content-Length`, or one sent chunked, is refused **411** - its size is only
+  knowable by reading it, and reading it is the attack - while an oversized body is
+  refused **413**. `EntityBody`, `DrainEntityBody` and `HeaderWait` are bounded too
+  (the .NET defaults are two minutes, so one stalled client would hold the only web
+  thread). Rejections are counted as `bodyRejections` in `/api/status`.
 - **Brute-force protection**: 5 failed logins per source IP per 5 minutes, then
   429 with `Retry-After` for 5 minutes. Wrong username and wrong password return
   the same message.
@@ -164,6 +173,10 @@ with the page. That is replaced by a real login:
   session cookie are unencrypted on the wire. Use a VPN or a trusted lab
   network, or put a TLS reverse proxy in front of it. Sentinel says so at startup
   when it is bound beyond localhost.
+- **Bounded request bodies and timeouts** - the web server refuses a body it
+  cannot size (411) or one over the route's budget (413) *before* reading a byte,
+  and caps how long a client may take to send a body, to drain one, or to finish its
+  headers. One slow client cannot hold the single web thread.
 - Response hardening: `Content-Security-Policy` with **`script-src 'self'`** (no
   inline script anywhere; `dashboard.js` and `login.js` are separate files),
   `X-Frame-Options: DENY`, `nosniff`, `no-store`. No CDN, no outbound calls.
@@ -182,7 +195,7 @@ with the page. That is replaced by a real login:
   both completed, so a slow or failing channel can neither hold back nor skip
   past the others.
 - **Per-event error isolation** - a malformed event is counted
-  (`/api/health` → `evalErrors`) and skipped; it cannot abort the rest of the
+  (`/api/status` → `evalErrors`) and skipped; it cannot abort the rest of the
   batch. A failed log read leaves that channel's watermark untouched and is
   retried next poll, so nothing is silently lost.
 - **Backlog catch-up** - a capped poll re-polls in `-CatchUpMilliseconds`
@@ -194,8 +207,16 @@ with the page. That is replaced by a real login:
   every in-engine check is unchanged, and if the provider rejects the XPath the
   channel falls back to the plain Id filter and remembers it.
 - **Poll lag is visible** - per-channel lag plus `evalErrors` / `pollErrors` are
-  in `/api/health` and shown as a pill in the dashboard ("catching up: Ns
-  behind"), with a warning past 2 minutes.
+  in `/api/status` and shown as a pill in the dashboard ("catching up: Ns behind"),
+  with a warning past 2 minutes. "Catching up" means the truth: the last poll had to
+  defer events, or the lag is past two poll intervals **plus** the 5 s watermark
+  overlap - an idle monitor carries one interval of lag by design and is *not*
+  behind.
+- **A poll reads only what it processes** - `Get-WinEvent -Oldest -MaxEvents (cap +
+  1)` - so a capped poll never materialises a whole backlog to throw most of it
+  away, and the watermark is backdated 5 s on an uncapped poll so an event written
+  between the query's snapshot and the poll start cannot fall outside every window
+  (the seen-record ring drops the re-read).
 - **Alerts persist** - `sentinel-history.csv` keeps every alert, its severity,
   ack and triage state, so state survives restarts and is shared across every
   browser (no browser-side storage).
@@ -217,6 +238,7 @@ Wazuh-style dark UI matching the ALPHA platform's design language:
 - **Filters** - severity buttons, status dropdown, and a Self-test visibility toggle
 - **Auto-refresh** - every 10 s (toggleable) + manual refresh button
 - **Health pill** - poll lag, skipped events and failed log reads, or "up to date"
+  (idle is idle: one poll interval of lag does not read as "catching up")
 - **Alert table** - time, severity badge, alert, account, host, MITRE; click a row for the detail pane
 - **Detail pane** - MITRE ATT&CK mapping (linked), rule, event ID, host, account, source IP, what happened, remediation guidance
 - **Triage** - per-alert status (New / Investigating / Resolved / False Positive) + notes, saved server-side
@@ -276,7 +298,7 @@ event log, no HTTP and no network needed - by a runner that drives the same
 functions the live monitor uses:
 
 ```powershell
-.\tests\run-tests.ps1      # 202 assertions, exit code 1 on any failure
+.\tests\run-tests.ps1      # 272 assertions, exit code 1 on any failure
 ```
 
 It covers detection behaviour in both directions, dedupe-per-entity, the
@@ -287,7 +309,12 @@ rate limiting, the users-file gate, the Host guard), the lost-event fix
 (per-event isolation, per-channel watermarks that only advance when a channel
 completed), backlog catch-up (a 5000-event backlog draining without loss or
 duplication) and the XPath pre-filter (well-formed, a superset of what the
-engine needs, and the fallback), then replays all 19 fixtures in
+engine needs, and the fallback), the hardening round (the request-body guard's
+411/413 boundaries, the idle-vs-catching-up rule, sessions ending with their
+account, the public-health / authenticated-status split, the 5 s watermark overlap
+and that the overlap is not double-counted, paged oldest-first polls that lose
+nothing across a page boundary, and PBKDF2 pinned to the RFC 6070 vectors), then
+replays all 19 fixtures in
 `tests/fixtures/`. See `tests/README.md`.
 
 ## Forwarding to the web platform
@@ -307,7 +334,7 @@ thresholds, so nothing appeared there.
 
 Forwarding has an 8-second timeout - a single slow platform call used to freeze
 the single-threaded poll loop, and the dashboard with it - and failures are
-counted and exposed on `/api/health` as `forwardingErrors` instead of being
+counted and exposed on `/api/status` as `forwardingErrors` instead of being
 swallowed.
 
 ## Run the headless collector (no UI)

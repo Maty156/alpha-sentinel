@@ -1,10 +1,10 @@
-# Changelog
+﻿# Changelog
 
 ## v2.2
 
 Replaces the injected-token dashboard with a real login, and makes the polling
 loop able to lose neither events nor time. Verified against the PowerShell parser
-and a **202-assertion** suite (no elevation, no event log, no HTTP needed -
+and a **272-assertion** suite (no elevation, no event log, no HTTP needed -
 `tests/run-tests.ps1`), plus a live HTTP run of the auth flow.
 
 ### 1. Real login (replaces the injected API token)
@@ -27,7 +27,8 @@ and a **202-assertion** suite (no elevation, no event log, no HTTP needed -
   sends the browser to the sign-in page.
 - **Authorization**: every `/api/*` route except `/api/health` and
   `POST /api/login` answers 401 JSON without a live session. `/api/health` stays
-  open for probes and carries counters only - no alert content.
+  open for probes as a bare `{"ok":true}` - no counters and no alert content; the
+  counters moved to the authenticated `/api/status` in section 6.
 - **Brute-force protection**: 5 failed logins per source IP per 5 minutes, then
   429 with `Retry-After` for 5 minutes; one generic message for a bad username and
   a bad password; an unknown user costs the same hashing work as a known one.
@@ -73,9 +74,9 @@ and a **202-assertion** suite (no elevation, no event log, no HTTP needed -
   `lastError`), and the watermark is left alone so those events are retried.
 - A seen-record ring means the boundary event re-read on the next poll is not
   evaluated twice, and a poison event is never retried forever.
-- `/api/health` exposes `evalErrors`, `pollErrors` and per-channel
-  `lastSuccess` / `lastError` / `lagSeconds`, and the dashboard shows them as a
-  pill.
+- `/api/status` (authenticated; `/api/health` until section 6) exposes
+  `evalErrors`, `pollErrors` and per-channel `lastSuccess` / `lastError` /
+  `lagSeconds`, and the dashboard shows them as a pill.
 
 ### 4. Backlog catch-up and lag
 
@@ -89,9 +90,10 @@ and a **202-assertion** suite (no elevation, no event log, no HTTP needed -
   provider rejects the query the channel falls back to the plain Id filter for good.
 - Each channel queries only from its own watermark, so a deferred poll does not
   re-read what it already handled.
-- **Poll lag** (now minus the oldest channel watermark) is in `/api/health` per
+- **Poll lag** (now minus the oldest channel watermark) is in `/api/status` per
   channel and as a whole, shown as a "catching up: Ns behind" pill, with a
-  warning past 2 minutes.
+  warning past 2 minutes. Section 6 fixes what "catching up" meant: an idle
+  monitor carries a poll interval of lag by design and is not behind.
 
 ### 5. Rule changes
 
@@ -101,6 +103,43 @@ and a **202-assertion** suite (no elevation, no event log, no HTTP needed -
 - **kerberoasting**: a single RC4 service ticket is **Medium**; 3 or more distinct
   service principals requested by one account inside 10 minutes escalates the open
   alert to **High** (the catalog severity is now Medium, matching the base case).
+
+### 6. Web-DoS, liveness and session hardening
+
+- **Request bodies are bounded, and refused before they are read.** The login route
+  accepts at most **8192** bytes and every other route **65536**; a body with no
+  `Content-Length`, or one that arrives chunked, is refused **411** (its size is
+  only knowable by reading it, which is the attack) and an oversized one is refused
+  **413**. The listener also bounds `EntityBody`, `DrainEntityBody` and `HeaderWait`
+  - the defaults were two minutes, which on a single-threaded server means one
+  stalled client holds the only thread. Rejections are counted and reported as
+  `bodyRejections`.
+- **An idle monitor no longer calls itself "catching up".** The test was
+  `lag > 2 seconds`, but a healthy system carries lag by design: it polls every
+  `-PollSeconds` and the watermark is deliberately backdated 5 s for overlap, so
+  the pill read "catching up" forever. Catching up now means *the last poll had to
+  defer events, or the lag is past two poll intervals plus the 5 s overlap*,
+  computed once in `Get-CatchUpState` and mirrored by `dashboard.js`.
+- **`/api/health` is a bare liveness probe** - `{"ok":true}` and nothing else, so an
+  unauthenticated caller learns only that something is listening. Counters, lag,
+  session count and error tallies moved to the authenticated **`/api/status`**, which
+  is what the dashboard reads.
+- **Sessions die with their account.** `Get-Session` re-checks
+  `sentinel-users.json` (re-read only when its mtime moves) and ends any session
+  whose user is gone or whose record was rewritten, so
+  `New-SentinelAdmin.ps1 -Remove` / `-Reset` take effect on the very next request
+  instead of at the next restart. A session that carries no recorded account
+  revision is ended too: fail closed.
+- **A capped poll reads only what it processes** -
+  `Get-WinEvent -Oldest -MaxEvents (cap + 1)` instead of materialising a whole
+  backlog and discarding most of it. The `+1` is how a full page is recognised.
+- **The watermark overlaps by 5 s** on an uncapped poll (`pollStart - 5s`), so an
+  event written between the query's snapshot and the poll start cannot fall outside
+  every window. The seen-record ring drops the re-reads, so the overlap is free.
+- **`[Type]::new()` is gone** in favour of `New-Object` in both scripts: `::new()` is
+  PowerShell 5.0+ syntax and this has to run from 5.1 up. The construction is pinned
+  by the published RFC 6070 PBKDF2-HMAC-SHA1 vectors, so it is verified rather than
+  assumed.
 
 ### Performance (found while testing the backlog case)
 
