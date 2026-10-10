@@ -47,18 +47,20 @@ function fmtDate(iso) {
   return isNaN(d) ? String(iso) : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-// Every call carries the per-run token the server injected into this page.
-// Without it the server answers 401 - that is what stops any other page (or any
-// host on the LAN) from reading the alert feed or acking alerts, which the old
-// unauthenticated GET endpoints allowed.
+// The server protects every /api route with a session cookie. The cookie is
+// HttpOnly and same-origin, so the browser attaches it automatically and this
+// script never handles any credential.
 async function api(path, options = {}) {
   const res = await fetch(`/api${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Sentinel-Token': window.SENTINEL_TOKEN || '',
-    },
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
     ...options,
   });
+  if (res.status === 401) {
+    // session expired (8h absolute, 30 min idle) or was never established
+    window.location.replace('/');
+    throw new Error('Not signed in.');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
@@ -374,6 +376,53 @@ function renderPreflight() {
 }
 
 // ---------- wire up ----------
+// ---------- session ----------
+async function loadSession() {
+  try {
+    const data = await api('/session');
+    const el = document.getElementById('sessionUser');
+    if (el) el.innerHTML = 'signed in as <strong>' + esc(data.user) + '</strong>';
+  } catch (err) {
+    // api() already redirected to the sign-in page on 401
+  }
+}
+
+// ---------- tool health: poll lag and error counters ----------
+// "lag" is how far behind the OLDEST log channel is. If it climbs, Sentinel is
+// not keeping up and detections are the thing that suffers, so it is shown
+// rather than buried in an endpoint.
+let healthState = null;
+
+function renderHealth() {
+  const pill = document.getElementById('healthPill');
+  if (!pill || !healthState) return;
+  const lag = healthState.lagSeconds || 0;
+  const evalErrors = healthState.evalErrors || 0;
+  const pollErrors = healthState.pollErrors || 0;
+  const parts = [];
+  if (lag > 2) parts.push(`catching up: ${lag}s behind`);
+  if (evalErrors > 0) parts.push(`${evalErrors} event(s) skipped (malformed)`);
+  if (pollErrors > 0) parts.push(`${pollErrors} failed log read(s)`);
+  if (!parts.length) {
+    pill.textContent = 'up to date';
+    pill.className = 'health-pill ok';
+  } else {
+    pill.textContent = parts.join(' - ');
+    pill.className = 'health-pill ' + ((lag > 120 || pollErrors > 0) ? 'danger' : 'warn');
+  }
+  pill.style.display = 'inline-flex';
+  pill.title = `oldest channel ${lag}s behind - evalErrors ${evalErrors} - pollErrors ${pollErrors}`;
+}
+
+async function refreshHealth() {
+  try {
+    healthState = await api('/health');
+    renderHealth();
+  } catch (err) {
+    // best effort: the alert feed is what matters
+  }
+}
+
 function updateSelfTestToggle() {
   const btn = document.getElementById('selfTestToggle');
   if (!btn) return;
@@ -408,7 +457,15 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('autoRefreshToggle').addEventListener('change', e => {
     autoRefresh = e.target.checked;
   });
-  document.getElementById('refreshBtn').addEventListener('click', () => refresh(false));
+  document.getElementById('refreshBtn').addEventListener('click', () => { refresh(false); refreshHealth(); });
+
+  document.getElementById('logoutBtn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Signing out...';
+    try { await api('/logout', { method: 'POST' }); } catch (err) { /* already gone */ }
+    window.location.replace('/');
+  });
 
   // ---- self-test: fire one synthetic event per rule family ----
   document.getElementById('selfTestBtn').addEventListener('click', async e => {
@@ -490,7 +547,11 @@ document.addEventListener('DOMContentLoaded', () => {
     renderCoverage();
   });
 
-  setInterval(() => { if (autoRefresh) refresh(true); }, 10000);
+  setInterval(() => {
+    if (autoRefresh) { refresh(true); refreshHealth(); }
+  }, 10000);
+  loadSession();
   refresh(false);
+  refreshHealth();
   loadCoverage();
 });

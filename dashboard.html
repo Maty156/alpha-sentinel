@@ -130,6 +130,18 @@ button { font-family: inherit; cursor: pointer; }
 .fired-tag { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
 .fired-tag.hit { color: var(--green); font-weight: 700; }
 
+/* ---------- session + health pills ---------- */
+.who { font-size: 11.5px; color: var(--text-2); font-family: var(--mono); }
+.who strong { color: var(--text-1); font-weight: 700; }
+.health-pill {
+  display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700;
+  letter-spacing: 0.4px; padding: 5px 11px; border-radius: 9999px; white-space: nowrap;
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border); color: var(--text-1);
+}
+.health-pill.ok { background: rgba(74,222,128,0.1); border-color: rgba(74,222,128,0.3); color: var(--green); }
+.health-pill.warn { background: rgba(214,136,58,0.14); border-color: rgba(214,136,58,0.4); color: var(--amber); }
+.health-pill.danger { background: rgba(232,72,63,0.14); border-color: rgba(232,72,63,0.45); color: var(--red-light); }
+
 /* ---------- audit-policy preflight ---------- */
 .audit-banner {
   border: 1px solid var(--border); border-left-width: 3px; border-radius: 10px;
@@ -301,6 +313,7 @@ tbody tr.row-ack { opacity: 0.55; }
   </div>
   <div class="topbar-right">
     <span class="last-check" id="lastCheck">Connecting…</span>
+    <span class="health-pill" id="healthPill" style="display:none;"></span>
     <label class="toggle-wrap"><input type="checkbox" id="autoRefreshToggle" checked> Auto-refresh</label>
     <button class="btn" id="selfTestBtn" title="Fire one synthetic event per rule family through the real rule engine">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -314,6 +327,8 @@ tbody tr.row-ack { opacity: 0.55; }
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
       Export CSV
     </button>
+    <span class="who" id="sessionUser"></span>
+    <button class="btn" id="logoutBtn" title="End this session on the server">Logout</button>
   </div>
 </div>
 

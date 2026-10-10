@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in - ALPHA Sentinel</title>
+<style>
+:root {
+  --bg-0: #0a0a0c;
+  --bg-1: #101014;
+  --panel: #131318;
+  --border: rgba(255,255,255,0.08);
+  --border-bright: rgba(255,255,255,0.16);
+  --text-0: #f4f4f6;
+  --text-1: #a0a3ad;
+  --text-2: #5d606c;
+  --red: #e8483f;
+  --red-light: #ff5c52;
+  --mono: 'Roboto Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Plus Jakarta Sans', Roboto, sans-serif;
+  --t: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg-0); color: var(--text-0); font-family: var(--font);
+  font-size: 14px; line-height: 1.55; min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.login-card {
+  width: 100%; max-width: 400px;
+  border: 1px solid var(--border); border-radius: 16px; padding: 30px 28px 26px;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--bg-1) 100%);
+  box-shadow: 0 18px 60px rgba(0,0,0,0.55);
+}
+.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+.brand-mark {
+  width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgba(232,72,63,0.25), rgba(232,72,63,0.08));
+  border: 1px solid rgba(232,72,63,0.4); color: var(--red-light); flex: none;
+}
+.brand h1 { font-size: 15px; font-weight: 800; letter-spacing: 0.4px; }
+.brand .sub { font-size: 10.5px; color: var(--text-2); letter-spacing: 0.6px; text-transform: uppercase; }
+label { display: block; font-size: 10.5px; font-weight: 800; letter-spacing: 0.6px;
+  color: var(--text-2); text-transform: uppercase; margin: 0 0 5px; }
+.field { margin-bottom: 14px; }
+input[type=text], input[type=password] {
+  width: 100%; background: var(--bg-0); border: 1px solid var(--border); border-radius: 8px;
+  padding: 11px 13px; color: var(--text-0); font-size: 13.5px; font-family: inherit;
+  transition: border-color var(--t);
+}
+input[type=text]:focus, input[type=password]:focus { outline: none; border-color: var(--red); }
+button {
+  width: 100%; font-family: inherit; cursor: pointer; font-size: 13.5px; font-weight: 700;
+  border-radius: 8px; padding: 11px 14px; margin-top: 6px;
+  background: rgba(232,72,63,0.16); border: 1px solid rgba(232,72,63,0.45); color: var(--red-light);
+  transition: background var(--t), border-color var(--t);
+}
+button:hover { background: rgba(232,72,63,0.24); }
+button:disabled { opacity: 0.6; cursor: default; }
+.error {
+  display: none; margin-top: 14px; padding: 10px 12px; border-radius: 8px;
+  background: rgba(232,72,63,0.1); border: 1px solid rgba(232,72,63,0.4);
+  color: var(--red-light); font-size: 12.5px;
+}
+.note { margin-top: 18px; font-size: 11.5px; color: var(--text-2); line-height: 1.6; }
+.note code { font-family: var(--mono); color: var(--text-1); }
+</style>
+</head>
+<body>
+
+<form class="login-card" id="loginForm" autocomplete="on">
+  <div class="brand">
+    <div class="brand-mark">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    </div>
+    <div>
+      <h1>ALPHA SENTINEL</h1>
+      <div class="sub">AD / Network Attack Monitor</div>
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" autofocus spellcheck="false">
+  </div>
+  <div class="field">
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password">
+  </div>
+
+  <button type="submit" id="loginBtn">Sign in</button>
+  <div class="error" id="loginError"></div>
+
+  <div class="note">
+    Accounts are local to this host and created with <code>New-SentinelAdmin.ps1</code>.
+    Five failed attempts from one address locks it out for five minutes.
+  </div>
+</form>
+
+<script src="/login.js"></script>
+</body>
+</html>
