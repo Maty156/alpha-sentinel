@@ -783,6 +783,26 @@ try {
   $script:FakeFailXml = $false
 
   Write-Host ""
+  Write-Host "== v2.2 hardening: web DoS, catch-up, sessions, paging ==" -ForegroundColor Cyan
+
+  # --- PBKDF2 is built with New-Object and is really PBKDF2-HMAC-SHA1 -------
+  $salt6070 = [byte[]]@(0x73, 0x61, 0x6c, 0x74)
+  $vectors = @(
+    @{ Iterations = 1;    Expect = '0c60c80f961f0e71f3a9b524af6012062fe037a6' },
+    @{ Iterations = 2;    Expect = 'ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957' },
+    @{ Iterations = 4096; Expect = '4b007901b765489abead49d926f721d065a429c1' }
+  )
+  foreach ($v in $vectors) {
+    $hex = ((Get-PasswordHash 'password' $salt6070 $v.Iterations) | ForEach-Object { $_.ToString('x2') }) -join ''
+    Assert-True ($hex.Substring(0, 40) -eq $v.Expect) ("PBKDF2-HMAC-SHA1 matches RFC 6070 at " + $v.Iterations + " iteration(s)")
+  }
+  $monText = Get-Content -Raw $Script
+  $admText = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'New-SentinelAdmin.ps1')
+  Assert-True (-not ($monText -match 'Rfc2898DeriveBytes\]::new')) 'AlphaSentinel.ps1 no longer uses [Type]::new() for the KDF'
+  Assert-True (-not ($admText -match 'Rfc2898DeriveBytes\]::new')) 'New-SentinelAdmin.ps1 no longer uses [Type]::new() for the KDF'
+  Assert-True ($monText.Contains('New-Object -TypeName System.Security.Cryptography.Rfc2898DeriveBytes')) 'it constructs the KDF with New-Object instead'
+
+  Write-Host ""
   Write-Host "== fixture replay ==" -ForegroundColor Cyan
   $manifestPath = Join-Path $Fixtures 'expected.json'
   if (-not (Test-Path $manifestPath)) { throw "cannot find $manifestPath" }

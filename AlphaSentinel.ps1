@@ -1776,7 +1776,12 @@ function ConvertFrom-Hex([string]$Hex) {
 # int) - is the one that exists on .NET 4.x; the HashAlgorithmName overloads
 # need .NET 4.7.2+ and would throw on Server 2012 R2.
 function Get-PasswordHash([string]$Password, [byte[]]$Salt, [int]$Iterations) {
-  $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new([string]$Password, [byte[]]$Salt, [int]$Iterations)
+  # New-Object rather than [Type]::new(): ::new() is PowerShell 5.0+ syntax and
+  # this has to run on anything from 5.1 up. The constructor is the
+  # (string, byte[], int) overload that exists on .NET 4.x, and the explicit casts
+  # keep overload resolution unambiguous. The test suite pins the output against
+  # the published RFC 6070 vectors, so the construction is verified, not assumed.
+  $kdf = New-Object -TypeName System.Security.Cryptography.Rfc2898DeriveBytes -ArgumentList @([string]$Password, [byte[]]$Salt, [int]$Iterations)
   try { return $kdf.GetBytes(32) } finally { $kdf.Dispose() }
 }
 
