@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-# ALPHA SENTINEL v2 - AD / Network Attack Monitor (background service + web UI)
+# ALPHA SENTINEL v2.2 - AD / Network Attack Monitor (background service + web UI)
 # ============================================================================
 # A standalone Windows security monitor from the ALPHA Cybersecurity project.
 # Like Wazuh's agent+dashboard model, but as ONE script with zero dependencies:
@@ -10,12 +10,14 @@
 #     escalation, DCSync, directory enumeration, persistence, defense evasion,
 #     anti-forensics), and keeps alerts in memory + a history CSV so acks
 #     survive restarts.
-#   - Serves a MODERN WEB DASHBOARD on http://0.0.0.0:<Port> (default 8443):
-#     open it from any browser on the network - Wazuh-style dark UI with
-#     severity stat tiles, live search, severity/status filters, auto-refresh,
-#     per-alert detail with MITRE ATT&CK mapping and remediation guidance,
-#     a DETECTION COVERAGE table (every rule family + how often it fired),
-#     acknowledge/unacknowledge, a /api/self-test endpoint, and CSV export.
+#   - Serves a MODERN WEB DASHBOARD on http://localhost:<Port> (default 8443)
+#     BEHIND A LOGIN: local accounts in sentinel-users.json, PBKDF2-hashed, a
+#     server-side session and an HttpOnly session cookie. Wazuh-style dark UI
+#     with severity stat tiles, live search, severity/status filters,
+#     auto-refresh, per-alert detail with MITRE ATT&CK mapping and remediation
+#     guidance, a DETECTION COVERAGE table (every rule family + how often it
+#     fired + whether this host can log it at all), acknowledge/unacknowledge,
+#     a /api/self-test endpoint, and CSV export.
 #   - Optionally forwards every detection to the ALPHA web platform
 #     (separate private repo: Maty156/alpha) with the FULL normalised event
 #     payload, so the platform's own rule engine matches it. Forwarding is
@@ -51,6 +53,12 @@
 #   # of those - and 1100 was previously polled from System, where it never
 #   # appears, so that rule could never fire.
 #
+#   # FIRST RUN: create the dashboard account (the web UI is not served until a
+#   # users file exists - it will not fall back to being an open port). The
+#   # generated password is shown ONCE; save it.
+#   .\New-SentinelAdmin.ps1                      # user "admin", random password
+#   .\New-SentinelAdmin.ps1 -Username maty       # or your own username
+#
 #   # run in the BACKGROUND (no console window; -Background hides it and
 #   # writes sentinel.pid so -Stop can find the process later):
 #   powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -Background
@@ -58,23 +66,44 @@
 #   # or run in the FOREGROUND with a small console window:
 #   powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1
 #
-#   # then open:  http://localhost:8443
-#   #             (the dashboard binds to LOCALHOST by default; add
-#   #              -Bind 0.0.0.0 to serve the LAN, and read the -ApiToken note)
+#   # then open:  http://localhost:8443   and sign in
+#   #             (the dashboard binds to LOCALHOST by default and only accepts
+#   #              loopback Host headers. -Bind 0.0.0.0 serves the LAN: over
+#   #              plain HTTP the password and cookie are UNENCRYPTED, so use a
+#   #              VPN / trusted lab network or a TLS reverse proxy.)
 #
 # Optional flags:
 #   -Port 8443                  web dashboard port
 #   -Bind localhost              interface to bind ('localhost', '0.0.0.0', or an IP)
-#   -ApiToken <string>          require this token on /api/* (auto-generated if omitted)
 #   -PollSeconds 15             event-log poll interval
 #   -MaxEventsPerPoll 500       cap events parsed per poll (oldest first)
+#   -CatchUpMilliseconds 200    when a poll was capped, retry this soon instead
+#                               of waiting a whole -PollSeconds
 #   -Background                 run with no console window (service-style)
 #   -Stop                       stop a running background monitor and exit
 #   -ForwardUrl / -ForwardKey   forward detections to the ALPHA web platform
 #   -HistoryFile                alert history CSV (default sentinel-history.csv)
-#   -StateFile                  poll watermark / runtime state (sentinel-state.json)
+#   -StateFile                  per-channel poll watermarks + runtime state
+#                               (sentinel-state.json)
+#   -UsersFile                  dashboard accounts (sentinel-users.json)
+#   -AuthFile                   login audit trail (sentinel-auth.csv)
 #   -ReplayPath <file|dir>      replay exported event XML (wevtutil) through the
 #                               real rule engine, print an alert report, exit
+#
+# LOGIN / SESSION MODEL:
+#   - accounts in sentinel-users.json: PBKDF2 (per-user 16-byte salt, >= 100000
+#     iterations); only salt + hash + iterations are stored
+#   - POST /api/login -> a session id (32 random bytes) kept in memory, 8h
+#     absolute lifetime, 30 min sliding idle timeout, cookie
+#     sentinel_session=<id>; Path=/; HttpOnly; SameSite=Strict
+#   - POST /api/logout destroys it. Every /api/* route except /api/health and
+#     POST /api/login answers 401 without a live session.
+#   - 5 failed logins per source IP per 5 minutes -> 429 for 5 minutes. Failures
+#     and successes are audited to sentinel-auth.csv (IP + username, never the
+#     password), and the same error is returned for a bad username and a bad
+#     password.
+#   - state-changing routes stay POST-only and same-origin; on a loopback bind
+#     only loopback Host headers are accepted (DNS-rebinding guard).
 #
 # STOP the background monitor (either works):
 #   powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -Stop
@@ -84,21 +113,23 @@
 
 param(
   [int]$Port = 8443,
-  # Default bind is LOCALHOST. The previous build listened on http://+:8443
-  # (every interface) with no authentication and GET-triggerable state changes,
-  # so any host on the network - or any web page loaded in an admin's browser -
-  # could read the alert feed and ack / close alerts. Serving the LAN now needs
-  # an explicit -Bind, and every /api/* call carries the token below.
+  # Default bind is LOCALHOST, and the dashboard is behind a real login now (see
+  # the AUTHENTICATION section) rather than a token that travelled with the
+  # page. Serving the LAN is opt-in via -Bind.
   [string]$Bind = "localhost",
-  [string]$ApiToken = "",
   [int]$PollSeconds = 15,
   [int]$MaxEventsPerPoll = 500,
+  # When a poll had to defer events (cap reached) the next poll runs this soon
+  # instead of waiting a whole -PollSeconds.
+  [int]$CatchUpMilliseconds = 200,
   [switch]$Background,
   [switch]$Stop,
   [string]$ForwardUrl = "",
   [string]$ForwardKey = "",
   [string]$HistoryFile = "",
   [string]$StateFile = "",
+  [string]$UsersFile = "",
+  [string]$AuthFile = "",
   [string]$ReplayPath = ""
 )
 
@@ -107,6 +138,12 @@ if (-not $HistoryFile -and $PSScriptRoot) {
 }
 if (-not $StateFile) {
   $StateFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-state.json" } else { "sentinel-state.json" }
+}
+if (-not $UsersFile) {
+  $UsersFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-users.json" } else { "sentinel-users.json" }
+}
+if (-not $AuthFile) {
+  $AuthFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-auth.csv" } else { "sentinel-auth.csv" }
 }
 $PidFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel.pid" } else { "sentinel.pid" }
 
@@ -334,10 +371,10 @@ $RuleMeta = @{
 
   # ---- Kerberos / directory ----
   kerberoasting = @{
-    Severity = 'High'; Title = 'Kerberos Service Ticket Request (Kerberoasting)'
+    Severity = 'Medium'; Title = 'Kerberos Service Ticket Request (Kerberoasting)'
     EventId = '4769'; EventIds = @('4769'); DedupeMinutes = 15
     Mitre = 'T1558.003 - Steal or Forge Kerberos Tickets: Kerberoasting'; Category = 'Credential Access'
-    Description = 'A SUCCESSFUL service ticket request used weak RC4 (0x17) encryption for a user-owned service principal - that ticket is then cracked offline for the service account password. Machine accounts ($), krbtgt and failed requests are excluded, and the description reports how many distinct SPNs were roasted in the window.'
+    Description = 'A SUCCESSFUL service ticket request used weak RC4 (0x17) encryption for a user-owned service principal - that ticket is then cracked offline for the service account password. Machine accounts ($), krbtgt and failed requests are excluded. One ticket is Medium; three or more distinct service principals requested by the same account inside 10 minutes raises the alert to High.'
     Remediation = 'Move service accounts to group-managed service accounts (gMSA) with AES keys, disable RC4 where possible, and rotate the targeted service account password.'
   }
   asrep_roasting = @{
@@ -470,8 +507,25 @@ $Script:ForwardFailures = 0
 $Script:SelfTestAlerts = 0
 $Script:AuditState = $null        # filled in by Update-AuditPreflight
 $Script:AuditCheckedAt = $null
-$Script:LastCheck = (Get-Date).AddMinutes(-2)
+$Script:LastCheck = (Get-Date).AddMinutes(-2)   # default for a channel with no mark yet
 $Script:ProcessedCount = 0
+$Script:StartedAt = Get-Date
+
+# ---- per-channel poll state ------------------------------------------------
+# One watermark PER LOG CHANNEL (Security / System / Defender). A single shared
+# watermark meant one slow or failing channel held back - or worse, advanced past
+# - the others. A channel's mark only moves when that channel's query AND its
+# processing both completed.
+$Script:ChannelMarks = @{}        # channel -> watermark (DateTime)
+$Script:ChannelLastSuccess = @{}  # channel -> last fully successful poll
+$Script:ChannelLastError = @{}    # channel -> last error message for that channel
+$Script:XPathFallback = @{}       # channel -> $true once the XPath pre-filter was rejected
+$Script:EvalErrors = 0            # events the rule engine threw on (skipped, not fatal)
+$Script:LastEvalError = ''
+$Script:PollErrors = 0            # failed channel queries (watermark left alone)
+$Script:LastPollError = ''
+$Script:LagSeconds = 0
+$Script:LagWarned = $false
 
 # Triage states - same vocabulary the ALPHA web platform uses for its alerts.
 $AlertStatuses = @('New', 'Investigating', 'Resolved', 'False Positive')
@@ -669,20 +723,45 @@ function Get-Window($name) {
 # processing it. The old code stamped every hit with Get-Date, so a rule that
 # says "8 failures in 10 minutes" was really measuring processing time: after a
 # slow poll (or a replay of exported events) the whole window shifted with it.
+#
+# Expiry is a PREFIX TRIM, not a Where-Object scan over the whole bucket. Events
+# are processed oldest-first, so the expired hits are always at the front, and
+# scanning the entire bucket for every event made a sustained brute force
+# quadratic - exactly when the tool needs to keep up. If an event ever arrives
+# out of order the array stops being monotonic, and the exact filter is used
+# instead, so a stale hit can never be counted.
 function Add-WindowHit($name, $bucket, $value, $minutes, $when = $null) {
   $w = Get-Window $name
   $stamp = if ($when) { ([datetime]$when).ToUniversalTime() } else { (Get-Date).ToUniversalTime() }
   if (-not $w.ContainsKey($bucket)) { $w[$bucket] = @() }
+  $kept = $w[$bucket]
   $cut = $stamp.AddMinutes(-$minutes)
-  $kept = @($w[$bucket] | Where-Object { $_.Time -gt $cut })
+
+  if ($kept.Count -gt 0 -and $kept[$kept.Count - 1].Time -le $stamp) {
+    $drop = 0
+    while ($drop -lt $kept.Count -and $kept[$drop].Time -le $cut) { $drop++ }
+    if ($drop -ge $kept.Count) { $kept = @() }
+    elseif ($drop -gt 0) { $kept = @($kept[$drop..($kept.Count - 1)]) }
+  } else {
+    $kept = @($kept | Where-Object { $_.Time -gt $cut })
+  }
+
   $kept += [PSCustomObject]@{ Value = $value; Time = $stamp }
   $w[$bucket] = $kept
   return $kept
 }
 
+# Distinct, non-empty values in a window. A hashtable rather than a
+# ForEach/Where/Select-Object pipeline: the pipeline ran per event and made the
+# spraying rules quadratic on a large window. Lower-cased keys keep the
+# case-insensitive behaviour of the old Select-Object -Unique.
 function Get-DistinctCount($items) {
-  $vals = @($items | ForEach-Object { $_.Value } | Where-Object { $_ })
-  return @($vals | Select-Object -Unique).Count
+  $seen = @{}
+  foreach ($item in @($items)) {
+    $v = $item.Value
+    if ($v) { $seen["$v".ToLower()] = $true }
+  }
+  return $seen.Count
 }
 
 # -- the alert object -------------------------------------------------------
@@ -1030,6 +1109,8 @@ function Evaluate-Event($e) {
         $problems = @()
         if (($gained -band 0x400000) -ne 0) { $problems += 'Kerberos pre-authentication is no longer required (AS-REP roastable)' }
         if (($gained -band 0x0020) -ne 0) { $problems += 'a password is no longer required' }
+        if (($gained -band 0x80000) -ne 0) { $problems += 'unconstrained Kerberos delegation was granted (TGTs are forwarded to this account, so it can impersonate any user to any service)' }
+        if (($gained -band 0x1000000) -ne 0) { $problems += 'constrained delegation with protocol transition was granted (it can obtain a service ticket for any user to the services it may delegate to)' }
         if (($lost -band 0x0002) -ne 0) { $problems += 'the account was re-enabled' }
         if ($problems.Count -gt 0) {
           $sev = if (($gained -band 0x400000) -ne 0) { 'Critical' } else { 'High' }
@@ -1086,8 +1167,11 @@ function Evaluate-Event($e) {
       if ($isRc4 -and -not $isFailure -and $svc -and -not (Test-MachineAccount $svc) -and $svc -notmatch '(?i)^krbtgt' -and -not (Test-MachineAccount $account)) {
         $hits = @(Add-WindowHit 'kerb' $account $svc 10 $evtTime)
         $distinctSpn = Get-DistinctCount $hits
-        # one SPN is a targeted roast; several inside the window is a sweep
-        $sev = if ($distinctSpn -ge 3) { 'Critical' } else { 'High' }
+        # A single RC4 service ticket is worth a look but is common enough
+        # (legacy services) to sit at Medium; three or more distinct SPNs inside
+        # the window is a kerberoasting sweep and escalates to High, upgrading
+        # any open alert for this account in place.
+        $sev = if ($distinctSpn -ge 3) { 'High' } else { 'Medium' }
         $desc = "Service ticket requested for `"$svc`" using weak RC4 encryption (0x17) - requesting account `"$account`"."
         if ($distinctSpn -gt 1) { $desc += " $distinctSpn distinct service principals requested in the last 10 minutes." }
         if (-not (Should-Dedupe 'kerberoasting' $account $sev $desc)) {
@@ -1464,22 +1548,59 @@ function Get-PreflightReport {
 # The old build hardcoded a 2-minute backfill on every start: restarting
 # re-alerted the last two minutes (duplicates) and still lost everything written
 # while the monitor was down (gap). The watermark is written on every poll now.
+# A channel name is not a valid JSON-friendly property name on its own
+# ("Microsoft-Windows-Windows Defender/Operational"), so marks are stored under a
+# sanitised key.
+function ConvertTo-StateKey([string]$Channel) {
+  return ("$Channel" -replace '[^A-Za-z0-9]', '_')
+}
+
 function Save-State {
   try {
+    $channels = @{}
+    foreach ($c in @($Script:ChannelMarks.Keys)) {
+      $channels[(ConvertTo-StateKey $c)] = $Script:ChannelMarks[$c].ToUniversalTime().ToString("o")
+    }
     @{
-      lastCheck = $Script:LastCheck.ToUniversalTime().ToString("o")
       savedAt   = (Get-Date).ToUniversalTime().ToString("o")
+      lastCheck = $Script:LastCheck.ToUniversalTime().ToString("o")
+      channels  = $channels
       forwarded = $Script:Forwarded
-    } | ConvertTo-Json | Set-Content -Path $StateFile -Encoding UTF8 -Force
+    } | ConvertTo-Json -Depth 4 | Set-Content -Path $StateFile -Encoding UTF8 -Force
   } catch { }
 }
 
+# Restores one watermark per channel, so a restart resumes each channel exactly
+# where it stopped instead of re-alerting the last two minutes (duplicates) or
+# skipping the downtime (gap). A v2.1 state file with a single global watermark
+# is still accepted.
 function Restore-State {
   if (-not (Test-Path $StateFile)) { return $false }
   try {
     $saved = Get-Content -Raw $StateFile | ConvertFrom-Json
-    if ($saved.lastCheck) {
-      $Script:LastCheck = ([datetime]$saved.lastCheck).ToLocalTime()
+    $restored = $false
+
+    if ($saved.channels) {
+      foreach ($key in @($saved.channels.PSObject.Properties.Name)) {
+        $value = "$($saved.channels.$key)"
+        if (-not $value) { continue }
+        foreach ($source in $LogSources) {
+          if ((ConvertTo-StateKey $source.Log) -eq $key) {
+            $Script:ChannelMarks[$source.Log] = ([datetime]$value).ToLocalTime()
+            $restored = $true
+          }
+        }
+      }
+    }
+
+    if (-not $restored -and $saved.lastCheck) {
+      $dt = ([datetime]$saved.lastCheck).ToLocalTime()
+      foreach ($source in $LogSources) { $Script:ChannelMarks[$source.Log] = $dt }
+      $restored = $true
+    }
+
+    if ($restored) {
+      $Script:LastCheck = ($Script:ChannelMarks.Values | Sort-Object)[0]
       $gap = (Get-Date) - $Script:LastCheck
       if ($gap.TotalMinutes -gt 2) {
         Write-Host ("  [state] resuming from " + $Script:LastCheck.ToString("u") + " - " + [int]$gap.TotalMinutes + " minute(s) of downtime will be polled.") -ForegroundColor Yellow
@@ -1610,24 +1731,282 @@ function Invoke-Replay($path) {
 }
 
 # ============================================================
+# AUTHENTICATION - local accounts, PBKDF2 hashes, server-side sessions
+# ============================================================
+# v2.1 protected the dashboard with a per-run token that was injected into the
+# page the server sent, so anyone who could open the port received the token
+# with the page - and "sign in" was really "can you reach this port". This is a
+# real login instead:
+#   * accounts live in sentinel-users.json, PBKDF2-hashed (per-user 16-byte
+#     salt, >= 100000 iterations), created by New-SentinelAdmin.ps1
+#   * POST /api/login verifies the password and mints a server-side session
+#   * the browser only ever holds an opaque session id in an HttpOnly cookie
+#   * failed logins are rate-limited per source IP and audited
+#
+# The record format below (algorithm, salt, iterations, hash encoding) is SHARED
+# with New-SentinelAdmin.ps1 - change one and you must change the other. The
+# test suite cross-checks that a hash written by the admin tool verifies here.
+
+$Script:SessionHours = 8        # absolute session lifetime
+$Script:IdleMinutes = 30        # sliding idle timeout
+$Script:MaxLoginFailures = 5    # failed logins per source IP ...
+$Script:LoginWindowMinutes = 5  # ... inside this window, before ...
+$Script:LoginBlockMinutes = 5   # ... the IP is blocked for this long
+$Script:Pbkdf2Iterations = 150000
+
+$Script:Sessions = @{}          # sessionId -> @{ User; Created; LastSeen }
+$Script:LoginFailures = @{}     # ip -> @{ Count; First; BlockedUntil }
+
+function ConvertTo-Hex([byte[]]$Bytes) {
+  return (($Bytes | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+
+function ConvertFrom-Hex([string]$Hex) {
+  if (-not $Hex) { return $null }
+  $clean = "$Hex" -replace '[^0-9a-fA-F]', ''
+  if ($clean.Length -eq 0 -or ($clean.Length % 2) -ne 0) { return $null }
+  $bytes = New-Object byte[] ($clean.Length / 2)
+  for ($i = 0; $i -lt $bytes.Length; $i++) {
+    $bytes[$i] = [Convert]::ToByte($clean.Substring($i * 2, 2), 16)
+  }
+  return $bytes
+}
+
+# PBKDF2-HMAC-SHA1 via Rfc2898DeriveBytes. This overload - (string, byte[],
+# int) - is the one that exists on .NET 4.x; the HashAlgorithmName overloads
+# need .NET 4.7.2+ and would throw on Server 2012 R2.
+function Get-PasswordHash([string]$Password, [byte[]]$Salt, [int]$Iterations) {
+  $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new([string]$Password, [byte[]]$Salt, [int]$Iterations)
+  try { return $kdf.GetBytes(32) } finally { $kdf.Dispose() }
+}
+
+function New-PasswordSalt {
+  $salt = New-Object byte[] 16
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $rng.GetBytes($salt) } finally { $rng.Dispose() }
+  return $salt
+}
+
+# Constant-time comparison: every byte is always touched, so the time taken does
+# not depend on how many leading bytes matched. The length check leaks only the
+# length, which is not secret.
+function Test-FixedTimeEquals([byte[]]$A, [byte[]]$B) {
+  if ($null -eq $A -or $null -eq $B) { return $false }
+  if ($A.Length -ne $B.Length) { return $false }
+  $diff = 0
+  for ($i = 0; $i -lt $A.Length; $i++) { $diff = $diff -bor ($A[$i] -bxor $B[$i]) }
+  return ($diff -eq 0)
+}
+
+function Get-UserStore {
+  if (-not (Test-Path $UsersFile)) { return $null }
+  try {
+    $raw = Get-Content -Raw $UsersFile
+    if (-not $raw) { return $null }
+    return ($raw | ConvertFrom-Json)
+  } catch { return $null }
+}
+
+function Get-UserRecord($store, [string]$UserName) {
+  if (-not $store -or -not $store.users -or -not $UserName) { return $null }
+  foreach ($u in @($store.users)) {
+    if ("$($u.user)" -eq $UserName) { return $u }
+  }
+  return $null
+}
+
+# Verifies a password against one user record. Every failure path (unknown user,
+# unreadable record, wrong password) returns $false having done a comparable
+# amount of hashing, so the response time does not reveal whether the username
+# exists.
+function Test-UserPassword([string]$UserName, [string]$Password) {
+  $store = Get-UserStore
+  $record = Get-UserRecord $store $UserName
+  $salt = New-PasswordSalt                 # dummy salt on the unknown-user path
+  $iterations = $Script:Pbkdf2Iterations
+  $expected = $null
+  if ($record) {
+    $rs = ConvertFrom-Hex "$($record.salt)"
+    if ($rs) { $salt = $rs }
+    $rh = ConvertFrom-Hex "$($record.hash)"
+    if ($rh) { $expected = $rh }
+    $ri = 0
+    [void][int]::TryParse("$($record.iterations)", [ref]$ri)
+    if ($ri -ge 1000) { $iterations = $ri }
+  }
+  $actual = Get-PasswordHash $Password $salt $iterations
+  if (-not $expected) { return $false }
+  return (Test-FixedTimeEquals $actual $expected)
+}
+
+# Does the web UI have anything to authenticate against? Called at startup:
+# without this the dashboard would either be an open port or dead, so it is
+# checked before the listener is created.
+function Get-UsersFileState {
+  if (-not (Test-Path $UsersFile)) {
+    return [PSCustomObject]@{
+      ok      = $false
+      reason  = 'missing'
+      message = "no user database at $UsersFile, so the dashboard will NOT be served. Create the first account with:  .\New-SentinelAdmin.ps1   (or -Username <name> for your own). Monitoring, alerting and forwarding continue without the dashboard."
+    }
+  }
+  $store = Get-UserStore
+  if (-not $store -or -not $store.users -or @($store.users).Count -eq 0) {
+    return [PSCustomObject]@{
+      ok      = $false
+      reason  = 'empty'
+      message = "$UsersFile has no users in it, so the dashboard will NOT be served. Add one with:  .\New-SentinelAdmin.ps1 -Username <name>"
+    }
+  }
+  return [PSCustomObject]@{ ok = $true; reason = 'ok'; message = "$(@($store.users).Count) user(s) in $UsersFile" }
+}
+
+# ---- sessions -------------------------------------------------------------
+function New-SessionId {
+  $bytes = New-Object byte[] 32          # 32 random bytes, hex -> 256 bits
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+  return (ConvertTo-Hex $bytes)
+}
+
+function New-Session([string]$UserName) {
+  $id = New-SessionId
+  $now = Get-Date
+  $Script:Sessions[$id] = [PSCustomObject]@{ User = $UserName; Created = $now; LastSeen = $now }
+  return $id
+}
+
+# Returns the session record and refreshes its idle timer, or $null when it is
+# unknown, past its 8h absolute lifetime, or idle for more than 30 minutes.
+function Get-Session([string]$SessionId) {
+  if (-not $SessionId) { return $null }
+  if (-not $Script:Sessions.ContainsKey($SessionId)) { return $null }
+  $s = $Script:Sessions[$SessionId]
+  $now = Get-Date
+  if (($now - $s.Created).TotalHours -ge $Script:SessionHours) {
+    $Script:Sessions.Remove($SessionId)
+    return $null
+  }
+  if (($now - $s.LastSeen).TotalMinutes -ge $Script:IdleMinutes) {
+    $Script:Sessions.Remove($SessionId)
+    return $null
+  }
+  $s.LastSeen = $now
+  return $s
+}
+
+function Remove-Session([string]$SessionId) {
+  if ($SessionId -and $Script:Sessions.ContainsKey($SessionId)) { $Script:Sessions.Remove($SessionId) }
+}
+
+function Remove-ExpiredSessions {
+  foreach ($id in @($Script:Sessions.Keys)) { $null = Get-Session $id }
+}
+
+function Get-SessionIdFromContext($ctx) {
+  if (-not $ctx) { return '' }
+  try {
+    $c = $ctx.Request.Cookies['sentinel_session']
+    if ($c -and $c.Value) { return "$($c.Value)" }
+  } catch { }
+  return ''
+}
+
+function Get-SessionUser($ctx) {
+  $s = Get-Session (Get-SessionIdFromContext $ctx)
+  if (-not $s) { return '' }
+  return "$($s.User)"
+}
+
+function Get-ClientAddress($ctx) {
+  try {
+    if ($ctx -and $ctx.Request -and $ctx.Request.RemoteEndPoint) { return "$($ctx.Request.RemoteEndPoint.Address)" }
+  } catch { }
+  return 'unknown'
+}
+
+# ---- login brute-force protection -----------------------------------------
+function Test-LoginAllowed([string]$Ip) {
+  if (-not $Script:LoginFailures.ContainsKey($Ip)) { return $true }
+  $rec = $Script:LoginFailures[$Ip]
+  if ($rec.BlockedUntil -and (Get-Date) -lt $rec.BlockedUntil) { return $false }
+  return $true
+}
+
+function Get-LoginRetryAfter([string]$Ip) {
+  if (-not $Script:LoginFailures.ContainsKey($Ip)) { return 0 }
+  $rec = $Script:LoginFailures[$Ip]
+  if (-not $rec.BlockedUntil) { return 0 }
+  $left = [int][Math]::Ceiling(($rec.BlockedUntil - (Get-Date)).TotalSeconds)
+  if ($left -lt 0) { return 0 }
+  return $left
+}
+
+function Register-LoginFailure([string]$Ip) {
+  $now = Get-Date
+  $rec = $null
+  if ($Script:LoginFailures.ContainsKey($Ip)) { $rec = $Script:LoginFailures[$Ip] }
+  if (-not $rec -or ($now - $rec.First).TotalMinutes -ge $Script:LoginWindowMinutes) {
+    $rec = [PSCustomObject]@{ Count = 0; First = $now; BlockedUntil = $null }
+    $Script:LoginFailures[$Ip] = $rec
+  }
+  $rec.Count = $rec.Count + 1
+  if ($rec.Count -ge $Script:MaxLoginFailures) {
+    $rec.BlockedUntil = $now.AddMinutes($Script:LoginBlockMinutes)
+  }
+  return $rec
+}
+
+function Reset-LoginFailures([string]$Ip) {
+  if ($Script:LoginFailures.ContainsKey($Ip)) { $Script:LoginFailures.Remove($Ip) }
+}
+
+# ---- auth audit trail -----------------------------------------------------
+# Every attempt is recorded - source IP, username, outcome, never a password -
+# in sentinel-auth.csv, so a login sweep is visible even when the alert feed is
+# quiet. Same formula-injection guard as the alert export.
+function Write-AuthEvent([string]$Ip, [string]$UserName, [string]$Outcome, [string]$Reason) {
+  try {
+    $row = [PSCustomObject]@{
+      Time     = (Get-Date).ToUniversalTime().ToString("o")
+      SourceIp = Protect-CsvCell $Ip
+      User     = Protect-CsvCell $UserName
+      Outcome  = $Outcome
+      Reason   = Protect-CsvCell $Reason
+    }
+    if (Test-Path $AuthFile) {
+      $row | Export-Csv -Path $AuthFile -NoTypeInformation -Force -Encoding UTF8 -Append
+    } else {
+      $row | Export-Csv -Path $AuthFile -NoTypeInformation -Force -Encoding UTF8
+    }
+  } catch { }
+}
+
+# ---- Host header guard (DNS rebinding) ------------------------------------
+# A browser sends whatever Host the page asked for, so a page on the internet can
+# point a name it controls at 127.0.0.1 and reach a loopback-bound dashboard.
+# When the bind is loopback, only loopback names are accepted.
+function Test-HostAllowed($ctx) {
+  if ($Bind -and $Bind -ne 'localhost' -and $Bind -ne '127.0.0.1' -and $Bind -ne '::1') { return $true }
+  try {
+    $hostHeader = "$($ctx.Request.Headers['Host'])"
+    if (-not $hostHeader) { return ($false) }   # guard the guard: no Host at all is refused
+    $name = $hostHeader
+    if ($name.StartsWith('[')) {
+      $end = $name.IndexOf(']')
+      if ($end -gt 0) { $name = $name.Substring(0, $end + 1) }
+    } elseif ($name.Contains(':')) {
+      $name = $name.Substring(0, $name.IndexOf(':'))
+    }
+    $name = $name.ToLower()
+    return ($name -eq 'localhost' -or $name -eq '127.0.0.1' -or $name -eq '[::1]' -or $name -eq '::1')
+  } catch { return $false }
+}
+
+# ============================================================
 # EMBEDDED WEB SERVER (dashboard + JSON API) - HttpListener, no deps
 # ============================================================
 $Script:DashboardDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-
-# ------------------------------------------------------------
-# API TOKEN
-# ------------------------------------------------------------
-# The old dashboard was an unauthenticated HTTP service on every interface, and
-# its state-changing endpoints accepted GET with no origin check - so any page
-# an administrator had open could silently ack or false-positive-close alerts.
-# Every /api/* call now needs this token (auto-generated per run unless
-# -ApiToken is supplied), and the dashboard gets it injected into the HTML it
-# is served, so the browser never has to store it.
-if (-not $ApiToken) {
-  $bytes = New-Object byte[] 24
-  [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-  $ApiToken = ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
-}
 
 function Send-Bytes($res, $bytes, $contentType, $status = 200) {
   $res.StatusCode = $status
@@ -1645,11 +2024,10 @@ function Send-Json($res, $json, $status = 200) {
   Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes($json)) 'application/json; charset=utf-8' $status
 }
 
-function Test-Authorized($ctx) {
-  $given = "$($ctx.Request.Headers['X-Sentinel-Token'])"
-  if (-not $given) { $given = "$($ctx.Request.QueryString['token'])" }
-  if (-not $given) { return $false }
-  return ($given -eq $Script:ApiToken)
+# True when the request presents a live session cookie. The token header and
+# ?token= are gone: they were readable by anyone who could fetch the page.
+function Test-Authenticated($ctx) {
+  return ($null -ne (Get-Session (Get-SessionIdFromContext $ctx)))
 }
 
 # CSRF guard for state-changing calls: a browser sends Origin (or Referer) on a
@@ -1685,13 +2063,12 @@ function Send-File($res, $path, $contentType) {
   }
   $body = Get-Content -Raw $path
   if ($contentType -like 'text/html*') {
-    # hand the page its API token, so every fetch() carries X-Sentinel-Token.
-    # Injected at serve time - the file on disk stays token-free.
-    $tokenScript = '<script>window.SENTINEL_TOKEN=' + ($Script:ApiToken | ConvertTo-Json) + ';</script>'
-    $csp = 'default-src ''self''; img-src ''self'' data:; style-src ''self'' ''unsafe-inline''; script-src ''self'' ''unsafe-inline''; connect-src ''self''; form-action ''none''; frame-ancestors ''none'''
+    # script-src stays 'self': nothing is injected into the page any more (the
+    # old build spliced the API token in here, which made that token readable by
+    # anyone who could fetch the page). Scripts ship as separate files:
+    # /dashboard.js and /login.js.
+    $csp = 'default-src ''self''; img-src ''self'' data:; style-src ''self'' ''unsafe-inline''; script-src ''self''; connect-src ''self''; form-action ''self''; frame-ancestors ''none''; base-uri ''none'''
     try { $res.Headers['Content-Security-Policy'] = $csp } catch { }
-    if ($body -match '</head>') { $body = $body -replace '</head>', ($tokenScript + '</head>') }
-    else { $body = $tokenScript + $body }
   }
   Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes($body)) $contentType
 }
@@ -1747,19 +2124,45 @@ function Get-AlertRows {
 # ThreadPool threads without a runspace, so the earlier Task.Run web thread
 # died silently. One loop drains web requests AND polls the event log
 # (works on PS 5.1 / Windows Server 2012).
+# Handle a single HTTP request context. Called from the MAIN thread loop -
+# single-threaded by design: PowerShell scriptblocks cannot run on .NET
+# ThreadPool threads without a runspace, so the earlier Task.Run web thread
+# died silently. One loop drains web requests AND polls the event log
+# (works on PS 5.1 / Windows Server 2012).
+#
+# Routing:
+#   /                        -> login.html when there is no session, else dashboard.html
+#   /login.html /login.js    -> the sign-in page (public)
+#   POST /api/login          -> verify + create a session, set the cookie (public)
+#   GET  /api/health         -> open, deliberately carries no alert content
+#   everything else /api/*   -> 401 JSON without a live session
+#   ack / unack / status / self-test / preflight-refresh / logout
+#                            -> POST only, same origin, and session required
 function Invoke-Handler($ctx) {
   $path = $ctx.Request.Url.AbsolutePath
   $method = "$($ctx.Request.HttpMethod)"
   $res = $ctx.Response
   try {
-    # ---- auth: every /api/* call needs the token (health stays open for
-    # ---- monitoring probes and carries no alert content)
-    if ($path -like '/api/*' -and $path -ne '/api/health' -and -not (Test-Authorized $ctx)) {
-      Send-Json $res '{"error":"Unauthorized. The dashboard must send the X-Sentinel-Token header; the token is printed at startup and injected into the page it serves (or set your own with -ApiToken)."}' 401
+    # ---- DNS-rebinding guard: on a loopback bind only loopback Host names
+    $allowed = Test-HostAllowed $ctx
+    if (-not $allowed) {
+      Send-Json $res '{"error":"Host header not allowed on this listener."}' 421
       return
     }
-    # ---- state-changing endpoints are POST-only and same-origin
-    if ($path -match '^/api/alerts/\d+/(ack|unack|status)$' -or $path -match '^/api/self-test$' -or $path -match '^/api/preflight/refresh$') {
+
+    # ---- session gate. /api/login and /api/health are the only public API
+    # ---- routes; /api/health returns counters only, never alert content.
+    $isApi = $path.StartsWith('/api/')
+    $isPublic = (($path -eq '/api/login') -or ($path -eq '/api/health'))
+    if ($isApi -and -not $isPublic) {
+      if (-not (Test-Authenticated $ctx)) {
+        Send-Json $res '{"error":"Not signed in."}' 401
+        return
+      }
+    }
+
+    # ---- state-changing routes are POST-only and same-origin
+    if ($path -match '^/api/alerts/\d+/(ack|unack|status)$' -or $path -eq '/api/self-test' -or $path -eq '/api/preflight/refresh' -or $path -eq '/api/logout') {
       if ($method -ne 'POST') {
         Send-Json $res '{"error":"Method not allowed - this endpoint changes state, so it accepts POST only."}' 405
         return
@@ -1772,10 +2175,123 @@ function Invoke-Handler($ctx) {
 
     switch -Regex ($path) {
       '^/$' {
-        Send-File $res (Join-Path $Script:DashboardDir 'dashboard.html') 'text/html; charset=utf-8'
+        if (Test-Authenticated $ctx) {
+          Send-File $res (Join-Path $Script:DashboardDir 'dashboard.html') 'text/html; charset=utf-8'
+        } else {
+          Send-File $res (Join-Path $Script:DashboardDir 'login.html') 'text/html; charset=utf-8'
+        }
+      }
+      '^/login\.html$' {
+        Send-File $res (Join-Path $Script:DashboardDir 'login.html') 'text/html; charset=utf-8'
+      }
+      '^/login\.js$' {
+        Send-File $res (Join-Path $Script:DashboardDir 'login.js') 'application/javascript; charset=utf-8'
       }
       '^/dashboard\.js$' {
         Send-File $res (Join-Path $Script:DashboardDir 'dashboard.js') 'application/javascript; charset=utf-8'
+      }
+      '^/api/login$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - sign in with POST."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+
+        $ip = Get-ClientAddress $ctx
+        # brute-force gate: 5 failures per IP per 5 minutes, then 429 for 5 min
+        if (-not (Test-LoginAllowed $ip)) {
+          $retry = Get-LoginRetryAfter $ip
+          try { $res.Headers.Add('Retry-After', "$retry") } catch { }
+          Write-AuthEvent $ip '' 'blocked' "rate limited, $retry s remaining"
+          Send-Json $res '{"error":"Too many failed sign-in attempts from this address. Try again in a few minutes."}' 429
+          return
+        }
+
+        $body = Read-JsonBody $ctx
+        $userName = ''
+        $password = ''
+        if ($body) {
+          if ($null -ne $body.username) { $userName = "$($body.username)" }
+          if ($null -ne $body.password) { $password = "$($body.password)" }
+        }
+        # the SAME message for an unknown user and a wrong password
+        $generic = '{"error":"Incorrect username or password."}'
+        if (-not $userName -or -not $password) {
+          [void](Register-LoginFailure $ip)
+          Write-AuthEvent $ip $userName 'failure' 'missing username or password'
+          Send-Json $res $generic 401
+          return
+        }
+        if (-not (Test-UserPassword $userName $password)) {
+          $rec = Register-LoginFailure $ip
+          Write-AuthEvent $ip $userName 'failure' "invalid credentials (failure $($rec.Count) in window)"
+          Send-Json $res $generic 401
+          return
+        }
+
+        Reset-LoginFailures $ip
+        $sid = New-Session $userName
+        Write-AuthEvent $ip $userName 'success' 'session created'
+        $res.Headers.Add('Set-Cookie', "sentinel_session=$sid; Path=/; HttpOnly; SameSite=Strict")
+        Send-Json $res (@{ ok = $true; user = $userName; sessionHours = $Script:SessionHours; idleMinutes = $Script:IdleMinutes } | ConvertTo-Json)
+      }
+      '^/api/logout$' {
+        $sid = Get-SessionIdFromContext $ctx
+        $who = Get-SessionUser $ctx
+        Remove-Session $sid
+        $res.Headers.Add('Set-Cookie', 'sentinel_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0')
+        Write-AuthEvent (Get-ClientAddress $ctx) $who 'logout' 'session destroyed'
+        Send-Json $res '{"ok":true}'
+      }
+      '^/api/session$' {
+        $s = Get-Session (Get-SessionIdFromContext $ctx)
+        Send-Json $res (@{
+          ok          = $true
+          user        = "$($s.User)"
+          sessionHours = $Script:SessionHours
+          idleMinutes  = $Script:IdleMinutes
+        } | ConvertTo-Json)
+      }
+      '^/api/health$' {
+        # Deliberately contains NO alert content (no titles, accounts, rules or
+        # descriptions) so it can stay unauthenticated for monitoring probes:
+        # counts, lag and error counters only.
+        $nonSelfTest = @($Script:Alerts | Where-Object { -not $_.SelfTest }).Count
+        $now = Get-Date
+        $channels = @()
+        $lagMax = 0
+        foreach ($c in @($Script:ChannelMarks.Keys)) {
+          $mark = $Script:ChannelMarks[$c]
+          $lag = [int][Math]::Round(($now - $mark).TotalSeconds)
+          if ($lag -gt $lagMax) { $lagMax = $lag }
+          $ls = $Script:ChannelLastSuccess[$c]
+          $channels += [PSCustomObject]@{
+            channel      = $c
+            lagSeconds   = $lag
+            lastSuccess  = if ($ls) { $ls.ToUniversalTime().ToString("o") } else { $null }
+            lastError    = "$($Script:ChannelLastError[$c])"
+            xpathBlocked = [bool]($Script:XPathFallback[$c])
+          }
+        }
+        $uptime = 0
+        if ($Script:StartedAt) { $uptime = [int][Math]::Round(($now - $Script:StartedAt).TotalSeconds) }
+        Send-Json $res (@{
+          ok               = $true
+          alerts           = $nonSelfTest
+          selfTestAlerts   = $Script:SelfTestAlerts
+          rules            = $RuleMeta.Count
+          usersConfigured  = @(Get-UserStore | ForEach-Object { $_.users }).Count
+          pollSeconds      = $PollSeconds
+          lagSeconds       = $lagMax
+          catchingUp       = ($lagMax -gt 2)
+          lagWarning       = ($lagMax -gt 120)
+          evalErrors       = $Script:EvalErrors
+          pollErrors       = $Script:PollErrors
+          lastEvalError    = "$($Script:LastEvalError)"
+          lastPollError    = "$($Script:LastPollError)"
+          channels         = $channels
+          forwarded        = $Script:Forwarded
+          forwardingErrors = $Script:ForwardFailures
+          auditBlind       = @(Get-RuleCatalog | Where-Object { $_.auditState -eq 'blind' }).Count
+          uptimeSeconds    = $uptime
+        } | ConvertTo-Json -Depth 4)
       }
       '^/api/alerts$' {
         # No query string -> serve the cached payload (rebuilt only when an
@@ -1951,19 +2467,6 @@ function Invoke-Handler($ctx) {
           error             = $probeError
         } | ConvertTo-Json -Depth 4)
       }
-      '^/api/health$' {
-        $nonSelfTest = @($Script:Alerts | Where-Object { -not $_.SelfTest }).Count
-        Send-Json $res (@{
-          ok               = $true
-          alerts           = $nonSelfTest
-          selfTestAlerts   = $Script:SelfTestAlerts
-          rules            = $RuleMeta.Count
-          lastCheck        = $Script:LastCheck.ToUniversalTime().ToString("o")
-          forwarded        = $Script:Forwarded
-          forwardingErrors = $Script:ForwardFailures
-          auditBlind       = @(Get-RuleCatalog | Where-Object { $_.auditState -eq 'blind' }).Count
-        } | ConvertTo-Json)
-      }
       default {
         Send-Json $res '{"error":"Not found."}' 404
       }
@@ -2126,8 +2629,41 @@ $MonitoredEventIdCount = (@($LogSources | ForEach-Object { $_.Ids }) | Select-Ob
 # (the poll watermark lives in the STATE block at the top, and is restored from
 #  $StateFile by Restore-State so a restart neither re-alerts nor skips the gap)
 
-# The seen-record ring keeps a re-queried event (Get-WinEvent StartTime is
-# inclusive, so the boundary event comes back) from being evaluated twice.
+# ---- channel watermarks ---------------------------------------------------
+function Get-ChannelMark($channel) {
+  if ($Script:ChannelMarks.ContainsKey($channel) -and $Script:ChannelMarks[$channel]) {
+    return $Script:ChannelMarks[$channel]
+  }
+  return $Script:LastCheck
+}
+
+function Set-ChannelMark($channel, $when) {
+  $Script:ChannelMarks[$channel] = $when
+  if ($Script:ChannelMarks.Count -gt 0) {
+    $Script:LastCheck = ($Script:ChannelMarks.Values | Sort-Object)[0]   # oldest
+  }
+}
+
+# Poll lag: how far behind the newest events the OLDEST channel is. This is the
+# number that says "the tool is not keeping up", so it is surfaced in
+# /api/health and as a dashboard pill.
+function Get-PollLagSeconds {
+  if ($Script:ChannelMarks.Count -eq 0) { return 0 }
+  $oldest = ($Script:ChannelMarks.Values | Sort-Object)[0]
+  return [int][Math]::Round(((Get-Date) - $oldest).TotalSeconds)
+}
+
+# 200 ms catch-up instead of a whole -PollSeconds when a poll had to defer
+# events: at the 500-event cap a full interval is only ~33 events/second, so the
+# backlog would never drain on a busy DC.
+function Get-NextPollDelaySeconds($capped) {
+  if ($capped) { return ([double]$CatchUpMilliseconds / 1000.0) }
+  return ([double]$PollSeconds)
+}
+
+# The seen-record ring keeps a re-queried event (the watermark boundary event
+# comes back, and a deferred poll re-reads its window) from being evaluated
+# twice.
 function Prune-SeenRecords {
   if ($Script:SeenRecords.Count -lt 5000) { return }
   $cut = (Get-Date).AddMinutes(-15)
@@ -2136,71 +2672,208 @@ function Prune-SeenRecords {
   }
 }
 
+# ---- XPath pre-filter for the noisiest event IDs --------------------------
+# Three IDs are the bulk of a busy DC's volume and nearly all of it is
+# uninteresting: 4624 (every logon and every service start), 4769 (every ticket)
+# and 4776 (every NTLM validation). Filtering them inside the query means that
+# XML is never parsed in PowerShell at all. Every in-engine check stays exactly
+# as it is - this only narrows what reaches the engine.
+#
+# The fragments below must be a SUPERSET of what the engine cares about: the
+# engine additionally treats 4776 Status "0" and "0x00000000" as success, and
+# 4769 "23" as RC4, and those extra events simply pass the filter and are then
+# rejected by the engine. The filter must never drop an event the engine would
+# have alerted on.
+$NoisyIdFilters = @{
+  '4624' = "Data[@Name='LogonType']='3' or Data[@Name='LogonType']='10'"
+  '4769' = "Data[@Name='TicketEncryptionType']='0x17' or Data[@Name='TicketEncryptionType']='23'"
+  '4776' = "not(Data[@Name='Status']='0x0')"
+}
+
+# The event-ID / event-data half of the query, as one disjunction. Kept separate
+# from the time predicate so it can be tested on its own (see the note below).
+function Get-ChannelIdDisjuncts($ids) {
+  $disjuncts = @()
+  foreach ($id in @($ids)) {
+    $key = "$id"
+    if ($NoisyIdFilters.ContainsKey($key)) {
+      $disjuncts += ("(System[EventID=" + $id + "] and EventData[" + $NoisyIdFilters[$key] + "])")
+    } else {
+      $disjuncts += ("System[EventID=" + $id + "]")
+    }
+  }
+  return ("(" + ($disjuncts -join " or ") + ")")
+}
+
+# The window start, formatted the way Windows itself formats it for a
+# -FilterHashtable StartTime (PowerShell's GetEventCommand builds
+# "s" + ".fff" + "Z"). The event log compares SystemTime in that form.
+function Format-EventLogTime([datetime]$When) {
+  $u = $When.ToUniversalTime()
+  $inv = [System.Globalization.CultureInfo]::InvariantCulture
+  return ($u.ToString("s", $inv) + "." + $u.Millisecond.ToString("d3", $inv) + "Z")
+}
+
+# NOTE on the time predicate: '@SystemTime>=' is a STRING RANGE comparison
+# inside the event log's own query engine - that is the form PowerShell itself
+# generates, so it is what the provider expects. A plain XPath 1.0 engine (e.g.
+# XmlDocument.SelectNodes, which the test harness uses) would coerce both sides
+# to numbers for a relational operator and get NaN, so the test suite validates
+# the ID/data disjunction against a real XML document and checks the shape of the
+# time predicate separately.
+function Get-ChannelFilterXPath($ids, $since) {
+  $sinceUtc = Format-EventLogTime ([datetime]$since)
+  return ("*[System[TimeCreated[@SystemTime>='" + $sinceUtc + "']] and " + (Get-ChannelIdDisjuncts $ids) + "]")
+}
+
+# The XPath above is a plain XPath expression ('>' and all), which is what a
+# test harness or a direct SelectNodes() call needs. It only has to be escaped
+# when it is embedded in the QueryList DOCUMENT below - if the '>' were escaped
+# in the expression itself, the XPath engine would choke on "&gt;=".
+function Get-ChannelFilterXml($channel, $ids, $since) {
+  $xpath = Get-ChannelFilterXPath $ids $since
+  $escaped = $xpath.Replace('>', '&gt;')
+  return ('<QueryList><Query Id="0" Path="' + $channel + '"><Select Path="' + $channel + '">' + $escaped + '</Select></Query></QueryList>')
+}
+
+# Query one channel. Returns @{ Events; UsedXPath }. THROWS on failure - the
+# caller leaves the watermark untouched so those events are retried, rather than
+# the old behaviour of swallowing the error with -ErrorAction SilentlyContinue
+# and advancing the watermark past events that were never read.
+#
+# If the provider rejects the XPath (it can, on a differently-patched DC) the
+# channel falls back to the plain Id filter and remembers, so the failing query
+# is not paid for on every poll.
+function Get-ChannelEvents($channel, $ids, $since) {
+  if (-not $Script:XPathFallback[$channel]) {
+    try {
+      $filterXml = Get-ChannelFilterXml $channel $ids $since
+      $events = @(Get-WinEvent -FilterXml $filterXml -ErrorAction Stop)
+      return @{ Events = $events; UsedXPath = $true }
+    } catch {
+      $Script:XPathFallback[$channel] = $true
+      $Script:ChannelLastError[$channel] = "XPath pre-filter rejected: $($_.Exception.Message)"
+      Write-Host ("  [poll] " + $channel + ": XPath pre-filter not accepted - using the plain Id filter from now on.") -ForegroundColor DarkYellow
+    }
+  }
+  $events = @(Get-WinEvent -FilterHashtable @{ LogName = $channel; Id = $ids; StartTime = $since } -ErrorAction Stop)
+  return @{ Events = $events; UsedXPath = $false }
+}
+
+# Process one channel's batch: oldest-first, capped, with a try/catch PER EVENT.
+# One malformed event used to abort the rest of the batch while the watermark
+# still advanced, which lost those events permanently. Now the bad event is
+# counted and skipped and the batch continues.
+function Invoke-ChannelBatch($channel, $events, $cap) {
+  $batch = @($events) | Sort-Object TimeCreated
+  $capped = $false
+  $deferred = 0
+  if ($cap -gt 0 -and $batch.Count -gt $cap) {
+    $deferred = $batch.Count - $cap
+    $batch = @($batch | Select-Object -First $cap)
+    $capped = $true
+  }
+
+  $evaluated = 0
+  $alerts = 0
+  $errors = 0
+  foreach ($e in $batch) {
+    $recId = [int64]0
+    try { $recId = [int64]$e.RecordId } catch { $recId = 0 }
+    if ($recId -gt 0) {
+      if ($Script:SeenRecords.ContainsKey($recId)) { continue }
+      # marked seen BEFORE evaluation: a poison event must not be retried forever
+      $Script:SeenRecords[$recId] = Get-Date
+    }
+    $evaluated++
+    $alert = $null
+    try {
+      $alert = Evaluate-Event $e
+    } catch {
+      $errors++
+      $Script:EvalErrors++
+      $Script:LastEvalError = "event $($e.Id) record $recId : $($_.Exception.Message)"
+      continue
+    }
+    if ($alert) {
+      $Script:Alerts.Add($alert)
+      $Script:ProcessedCount++
+      $alerts++
+      Forward-ToWeb $alert
+    }
+  }
+
+  $lastTime = $null
+  if ($batch.Count -gt 0) {
+    $last = $batch | Select-Object -Last 1
+    if ($last -and $last.TimeCreated) { $lastTime = $last.TimeCreated }
+  }
+  Prune-SeenRecords
+  return [PSCustomObject]@{
+    Evaluated = $evaluated
+    Alerts    = $alerts
+    Errors    = $errors
+    Capped    = $capped
+    Deferred  = $deferred
+    LastTime  = $lastTime
+  }
+}
+
 function Invoke-PollOnce {
   $anyError = $false
   $newAlerts = 0
-  # Read the watermark BEFORE querying and only advance it afterwards. Setting
-  # it to "now" after processing - the old behaviour - meant every event written
-  # while a slow poll was running landed in the gap and was never seen again.
+  $evaluatedTotal = 0
+  $anyCapped = $false
+  # Read the instant the poll began: a channel that completes moves its
+  # watermark here, so nothing written while the poll was running is skipped.
   $pollStart = Get-Date
-  $since = $Script:LastCheck
-  $capped = $false
-  $cappedBoundary = $null
 
   foreach ($source in $LogSources) {
+    $channel = $source.Log
+    $since = Get-ChannelMark $channel
     try {
-      $events = @(Get-WinEvent -FilterHashtable @{ LogName = $source.Log; Id = $source.Ids; StartTime = $since } -ErrorAction SilentlyContinue)
-      if ($events.Count -gt 0) {
-        # oldest-first: a capped poll then defers the NEWEST events instead of
-        # throwing them away, and the rolling windows see events in the order
-        # they actually happened (Get-WinEvent returns newest-first)
-        $batch = @($events | Sort-Object TimeCreated)
-        $overCap = 0
-        if ($MaxEventsPerPoll -gt 0 -and $batch.Count -gt $MaxEventsPerPoll) {
-          $overCap = $batch.Count - $MaxEventsPerPoll
-          $batch = @($batch | Select-Object -First $MaxEventsPerPoll)
-        }
+      $query = Get-ChannelEvents $channel $source.Ids $since
+      $batch = Invoke-ChannelBatch $channel $query.Events $MaxEventsPerPoll
 
-        foreach ($e in $batch) {
-          $recId = [int64]0
-          try { $recId = [int64]$e.RecordId } catch { $recId = 0 }
-          if ($recId -gt 0) {
-            if ($Script:SeenRecords.ContainsKey($recId)) { continue }
-            $Script:SeenRecords[$recId] = Get-Date
-          }
-          $alert = Evaluate-Event $e
-          if ($alert) {
-            $Script:Alerts.Add($alert)
-            $Script:ProcessedCount++
-            $newAlerts++
-            Forward-ToWeb $alert
-          }
-        }
-        Prune-SeenRecords
+      # The query AND the processing both completed, so the mark may move.
+      if ($batch.Capped -and $batch.LastTime) {
+        $mark = $batch.LastTime
+        if ($mark -lt $since) { $mark = $since }
+        $anyCapped = $true
+      } else {
+        $mark = $pollStart
+      }
+      Set-ChannelMark $channel $mark
+      $Script:ChannelLastSuccess[$channel] = $pollStart
+      $Script:ChannelLastError[$channel] = ''
+      $newAlerts += $batch.Alerts
+      $evaluatedTotal += $batch.Evaluated
 
-        if ($overCap -gt 0) {
-          # park the watermark on the last event actually handled, so the
-          # deferred ones are still inside the next query window
-          $capped = $true
-          $last = $batch | Select-Object -Last 1
-          if ($last -and $last.TimeCreated) {
-            if (-not $cappedBoundary -or $last.TimeCreated -lt $cappedBoundary) { $cappedBoundary = $last.TimeCreated }
-          }
-          Write-Host ("  [poll] " + $source.Log + ": " + $overCap + " event(s) over the " + $MaxEventsPerPoll + "-per-poll cap - deferred to the next poll.") -ForegroundColor DarkYellow
-        }
+      if ($batch.Capped) {
+        Write-Host ("  [poll] " + $channel + ": " + $batch.Deferred + " event(s) over the " + $MaxEventsPerPoll + "-per-poll cap - catching up.") -ForegroundColor DarkYellow
+      }
+      if ($batch.Errors -gt 0) {
+        Write-Host ("  [poll] " + $channel + ": " + $batch.Errors + " event(s) failed to evaluate and were skipped (see /api/health evalErrors).") -ForegroundColor DarkYellow
       }
     } catch {
-      Write-Host "  [poll] $($source.Log) error: $_" -ForegroundColor Red
+      # Query failed: leave the watermark where it is so these events are read
+      # again next poll instead of being skipped.
+      $Script:PollErrors++
+      $Script:LastPollError = "$channel : $($_.Exception.Message)"
+      $Script:ChannelLastError[$channel] = "$($_.Exception.Message)"
+      Write-Host "  [poll] $channel error (watermark left unchanged): $_" -ForegroundColor Red
       $anyError = $true
     }
   }
 
-  # advance the watermark: to the earliest capped boundary if we had to defer,
-  # otherwise to the instant the poll started (no gap, no overlap)
-  if ($capped -and $cappedBoundary) {
-    if ($cappedBoundary -gt $since) { $Script:LastCheck = $cappedBoundary }
+  $Script:LagSeconds = Get-PollLagSeconds
+  if ($Script:LagSeconds -gt 120) {
+    if (-not $Script:LagWarned) {
+      Write-Host ("  [poll] WARNING: " + $Script:LagSeconds + "s behind on the newest events - the backlog is not draining.") -ForegroundColor Red
+      $Script:LagWarned = $true
+    }
   } else {
-    $Script:LastCheck = $pollStart
+    $Script:LagWarned = $false
   }
 
   if ($newAlerts -gt 0) {
@@ -2208,7 +2881,13 @@ function Invoke-PollOnce {
     Save-History
   }
   Save-State
-  return (-not $anyError)
+  return [PSCustomObject]@{
+    Ok        = (-not $anyError)
+    Capped    = $anyCapped
+    Alerts    = $newAlerts
+    Evaluated = $evaluatedTotal
+    Lag       = $Script:LagSeconds
+  }
 }
 
 # (Stop-Sentinel / -Stop are defined near the top of this file, next to the pid
@@ -2252,25 +2931,43 @@ try { Set-Content -Path $PidFile -Value $PID -Encoding Ascii -Force } catch { }
 # audit-policy preflight BEFORE the dashboard starts reporting healthy coverage
 $null = Update-AuditPreflight
 
-# resume the poll watermark from the previous run (no re-alerting the last two
-# minutes, no blind spot for the downtime)
+# resume the per-channel poll watermarks from the previous run: no re-alerting
+# the last two minutes (duplicates) and no blind spot for the downtime (gap)
 $null = Restore-State
 
-$listener = Start-WebServer
+# ---- the web UI only starts when there is an account to authenticate against
+# Without a users file the dashboard would be either an open port or a dead end,
+# so it is not served at all. Monitoring, alerting and forwarding carry on.
+$usersState = Get-UsersFileState
+$listener = $null
+if ($usersState.ok) {
+  $listener = Start-WebServer
+} else {
+  Write-Host ""
+  Write-Host "  [web] NOT STARTED - $($usersState.message)" -ForegroundColor Red
+  Write-Host "  [web] Monitoring, alerting and forwarding keep running without it." -ForegroundColor Yellow
+}
 
 Write-Host ""
 Write-Host "  ============================================================" -ForegroundColor Red
-Write-Host "   ALPHA SENTINEL v2 - AD / Network Attack Monitor" -ForegroundColor Red
+Write-Host "   ALPHA SENTINEL v2.2 - AD / Network Attack Monitor" -ForegroundColor Red
 Write-Host "  ============================================================" -ForegroundColor Red
-if (-not $Bind -or $Bind -eq 'localhost' -or $Bind -eq '127.0.0.1') {
-  Write-Host "   Web dashboard : http://localhost:$Port  (localhost only - add -Bind 0.0.0.0 to serve the LAN)" -ForegroundColor Green
+if ($listener) {
+  if (-not $Bind -or $Bind -eq 'localhost' -or $Bind -eq '127.0.0.1') {
+    Write-Host "   Web dashboard : http://localhost:$Port  (sign in required; loopback only - add -Bind 0.0.0.0 to serve the LAN)" -ForegroundColor Green
+  } else {
+    Write-Host "   Web dashboard : http://<this-ip>:$Port  (bound to $Bind; sign in required)" -ForegroundColor Green
+    Write-Host "   WARNING       : plain HTTP beyond localhost - the password and the session cookie are" -ForegroundColor Yellow
+    Write-Host "                   UNENCRYPTED. Use a VPN or a trusted lab network, or put a TLS reverse" -ForegroundColor Yellow
+    Write-Host "                   proxy in front of it." -ForegroundColor Yellow
+  }
+  Write-Host "   Sign-in       : $($usersState.message)" -ForegroundColor Green
+  Write-Host ("   Sessions      : {0}h absolute, {1}min idle timeout, HttpOnly SameSite=Strict cookie" -f $Script:SessionHours, $Script:IdleMinutes) -ForegroundColor DarkGray
+  Write-Host "   Auth audit    : $AuthFile"
 } else {
-  Write-Host "   Web dashboard : http://<this-ip>:$Port  (bound to $Bind)" -ForegroundColor Green
+  Write-Host "   Web dashboard : NOT SERVED (no user database - see the message above)" -ForegroundColor Red
 }
-Write-Host "   API token     : $ApiToken" -ForegroundColor Green
-Write-Host "                   the dashboard page is handed this automatically; any other" -ForegroundColor DarkGray
-Write-Host "                   client must send it as the X-Sentinel-Token header" -ForegroundColor DarkGray
-Write-Host "   Polling       : $MonitoredEventIdCount event IDs across $($LogSources.Count) log channels every $PollSeconds sec (cap $MaxEventsPerPoll/poll)"
+Write-Host "   Polling       : $MonitoredEventIdCount event IDs across $($LogSources.Count) log channels every $PollSeconds sec (cap $MaxEventsPerPoll/poll, $CatchUpMilliseconds ms catch-up)"
 Write-Host "   Rules         : $($RuleMeta.Count) families (spraying, brute force, Kerberos attacks,"
 Write-Host "                   DCSync, enumeration, privesc, persistence, evasion)"
 if ($ForwardUrl) { Write-Host "   Forwarding    : enabled -> $ForwardUrl" -ForegroundColor Yellow }
@@ -2278,8 +2975,7 @@ else { Write-Host "   Forwarding    : off (standalone mode)" -ForegroundColor Da
 Write-Host "   History       : $HistoryFile"
 Write-Host "   State         : $StateFile"
 Write-Host "   Stop          : .\AlphaSentinel.ps1 -Stop    (or Stop-Sentinel)"
-Write-Host "   Self-test     : the Self-test button, or POST http://localhost:$Port/api/self-test"
-Write-Host "   Coverage      : http://localhost:$Port  -> Detection coverage panel"
+Write-Host "   Self-test     : the Self-test button, or POST /api/self-test"
 
 $preflight = Get-PreflightReport
 Write-Host ""
@@ -2304,25 +3000,37 @@ Write-Host ""
 # loop nearly idle. Works on PS 5.1 / Windows Server 2012.
 $Script:NextPoll = (Get-Date).AddSeconds(1)
 $Script:PendingTask = $null
+$Script:NextUsersReminder = (Get-Date).AddSeconds(60)
 try {
   while ($true) {
-    if ($null -ne $Script:PendingTask -and $Script:PendingTask.IsCompleted) {
-      $ctx = $Script:PendingTask.Result
-      $Script:PendingTask = $null
-      $null = Invoke-Handler $ctx
-      continue   # drain any further queued requests immediately
-    }
-    if ($null -eq $Script:PendingTask) {
-      $Script:PendingTask = $listener.GetContextAsync()
+    if ($null -ne $listener) {
+      if ($null -ne $Script:PendingTask -and $Script:PendingTask.IsCompleted) {
+        $ctx = $Script:PendingTask.Result
+        $Script:PendingTask = $null
+        $null = Invoke-Handler $ctx
+        continue   # drain any further queued requests immediately
+      }
+      if ($null -eq $Script:PendingTask) {
+        $Script:PendingTask = $listener.GetContextAsync()
+      }
+      Remove-ExpiredSessions
+    } elseif ((Get-Date) -ge $Script:NextUsersReminder) {
+      # no dashboard: keep reminding the admin, but not on every 250 ms tick
+      Write-Host "  [web] still not served - $($usersState.message)" -ForegroundColor DarkYellow
+      $Script:NextUsersReminder = (Get-Date).AddMinutes(5)
     }
     if ((Get-Date) -ge $Script:NextPoll) {
-      $null = Invoke-PollOnce
-      $Script:NextPoll = (Get-Date).AddSeconds($PollSeconds)
+      $pollResult = Invoke-PollOnce
+      # A capped poll retries in -CatchUpMilliseconds (200 ms) instead of a whole
+      # -PollSeconds: at the 500-event cap a full interval is only ~33
+      # events/second, so a backlog would never drain on a busy DC.
+      $delay = Get-NextPollDelaySeconds $pollResult.Capped
+      $Script:NextPoll = (Get-Date).AddSeconds($delay)
     }
     Start-Sleep -Milliseconds 250
   }
 } finally {
-  try { $listener.Stop() } catch { }
+  if ($listener) { try { $listener.Stop() } catch { } }
   Save-History
   Save-State
   Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
