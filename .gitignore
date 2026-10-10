@@ -4,5 +4,10 @@ sentinel-state.json
 sentinel.pid
 collector-state.json
 
+# Credential store and login audit trail: local to the host, never committed.
+sentinel-users.json
+sentinel-auth.csv
+*.users.json
+
 # Replay reports (AlphaSentinel -ReplayPath writes <input>.alerts.csv)
 *.alerts.csv
