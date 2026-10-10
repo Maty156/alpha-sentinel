@@ -56,7 +56,10 @@
       "kerberoasting"
     ],
     "forbid": [],
-    "note": "krbtgt and the machine SPN HOST/PC01 are excluded; the single user SPN MSSQLSvc/sql01 with RC4 is the roast."
+    "note": "krbtgt and the machine SPN HOST/PC01 are excluded; the single user SPN MSSQLSvc/sql01 with RC4 is the roast, reported at Medium because one RC4 ticket on its own is not proof of a sweep.",
+    "expectSeverity": {
+      "kerberoasting": "Medium"
+    }
   },
   "kerberoasting-4769-failure.xml": {
     "expect": [],
@@ -114,5 +117,32 @@
     ],
     "forbid": [],
     "note": "RDP by an admin-style account."
+  },
+  "uac-4738-delegation-granted.xml": {
+    "expect": [
+      "account_control_changed"
+    ],
+    "forbid": [],
+    "expectSeverity": {
+      "account_control_changed": "High"
+    },
+    "note": "DONT_REQ_PREAUTH was already absent; what changed is TRUSTED_FOR_DELEGATION (0x80000) being newly set. Unconstrained delegation lets an attacker who owns the account impersonate any user to any service, so it is reported at High - and ONLY when the bit actually moved."
+  },
+  "uac-4738-delegation-unchanged.xml": {
+    "expect": [],
+    "forbid": [
+      "account_control_changed"
+    ],
+    "note": "The account already had unconstrained delegation before this edit. The rule compares new AND NOT old, so re-saving the account is silent."
+  },
+  "kerberoasting-4769-sweep.xml": {
+    "expect": [
+      "kerberoasting"
+    ],
+    "expectCount": 1,
+    "expectSeverity": {
+      "kerberoasting": "High"
+    },
+    "note": "Three distinct user-owned RC4 service principals requested by one account inside the window: a kerberoasting sweep. One alert, escalated in place to High (a single SPN is only Medium)."
   }
 }

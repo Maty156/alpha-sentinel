@@ -14,6 +14,10 @@ These fixtures are small, hand-written event XML in the exact shape the real
 events have (field names taken from Microsoft's per-event reference pages). Each
 one has its expected outcome in `expected.json`.
 
+`tests/run-tests.ps1` replays every fixture as part of its 202 assertions, so a
+fixture that starts behaving differently fails the suite rather than quietly
+changing coverage.
+
 ## Run them
 
 ```powershell
@@ -49,6 +53,7 @@ wevtutil qe C:\evt\security.evtx /f:xml /c:1000 > C:\evt\security.xml
   "expect":  ["dcsync_replication"],   // rule keys that MUST fire
   "expectCount": 2,                    // optional: exact count of expect[0]
   "forbid":  ["ldap_recon"],           // rule keys that must NOT fire
+  "expectSeverity": { "kerberoasting": "Medium" },   // optional: severity per key
   "note":    "why this fixture exists"
 }
 ```
@@ -77,6 +82,9 @@ miss.
 | `privesc-4728-two-accounts.xml` | `privilege_escalation` x2 | Dedupe is per added account, not per rule |
 | `logon-4624-service-account-type3.xml` | nothing | Routine service-account network logon is not lateral movement |
 | `logon-4624-domain-admin-rdp.xml` | `suspicious_remote_logon` | Admin RDP does fire |
+| `uac-4738-delegation-granted.xml` | `account_control_changed` (High) | Unconstrained delegation (`0x80000`) newly set |
+| `uac-4738-delegation-unchanged.xml` | nothing | Re-saving an account that already had the delegation bit |
+| `kerberoasting-4769-sweep.xml` | `kerberoasting` (High) | Three distinct RC4 SPNs by one account - one escalated alert |
 
 ## Adding a fixture
 
