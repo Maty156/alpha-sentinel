@@ -20,7 +20,10 @@ Covered:
      and the fallback when the provider rejects it
   9. v2.3 part 1: the stalled-body watchdog (C# SentinelBody reader, 2s limit,
      abort, stall counter, per-address block)
-  10. v2.2 hardening: the request-body DoS guard (411/413 before any read), the
+  10. v2.3 part 2: the dashboard backend - events ring buffer, hosts seen, hourly
+     buckets, deltas, coverage/health, the four GET endpoints and the alert
+     object's status/ack/mitre/first-last-seen/contributing-events shape
+  11. v2.2 hardening: the request-body DoS guard (411/413 before any read), the
      idle-vs-catching-up verdict, sessions ending with their account, the
      public-health/authenticated-status split, the 5s watermark overlap, paged
      oldest-first polls, and New-Object PBKDF2 pinned to RFC 6070 vectors
@@ -160,6 +163,13 @@ try {
     $Script:BodyTimeouts = 0
     $Script:BodyTimedOut = $false
     $Script:BodyStalls = @{}
+    $Script:ObsEvents = New-Object System.Collections.Generic.List[object]
+    $Script:ObsHosts = @{}
+    $Script:ObsHours = @{}
+    $Script:LastNormFields = $null
+    $Script:LastEventTime = $null
+    $Script:LastMatchedRule = $null
+    $Script:AuditState = $null
     $Script:LastPollCapped = $false
     $Script:LastCheck = (Get-Date).AddMinutes(-2)
     $script:Raised = @()
@@ -1092,6 +1102,221 @@ try {
   Assert-True ($web2.Contains('$bodyParsed = Read-JsonBody $ctx $bodyLimit')) 'the handler reads the body once, with the watchdog'
   Assert-True (-not $web2.Contains('# drain the body')) 'the routes no longer read (and re-drain) it themselves'
   Assert-True ((Get-Content -Raw $Script).Contains('[SentinelBody]::Read($ctx.Request.InputStream')) 'Read-JsonBody reads through the bounded C# reader'
+
+  Write-Host ""
+  Write-Host "== v2.3 part 2: dashboard backend ==" -ForegroundColor Cyan
+
+  # --- the events ring buffer ----------------------------------------------
+  Reset-Engine
+  $when = (Get-Date).AddMinutes(-5)
+  Add-ObservedEvent 'Security' @{ eventId = '4625'; hostname = 'DC01'; accountName = 'jsmith'; sourceIp = '10.0.0.7'; timestamp = $when.ToString('o') } 'brute_force_single_account' $when
+  Add-ObservedEvent 'Security' @{ eventId = '9999'; hostname = 'DC01'; accountName = 'svc'; timestamp = $when.ToString('o') } $null $when
+  Assert-True ($Script:ObsEvents.Count -eq 2) 'each evaluated event lands in the ring buffer'
+  $keys = @($Script:ObsEvents[0].PSObject.Properties.Name)
+  Assert-True ($keys.Count -eq 8) ('a ring entry carries exactly the documented fields (got ' + ($keys -join ',') + ')')
+  foreach ($need in @('time', 'eventId', 'channel', 'host', 'user', 'sourceIp', 'summary', 'matchedRule')) {
+    Assert-True ($keys -contains $need) ('   ring entry has ' + $need)
+  }
+  Assert-True ($Script:ObsEvents[1].matchedRule -eq $null) 'matchedRule is null when no rule fired'
+  Assert-True ($Script:ObsEvents[0].matchedRule -eq 'brute_force_single_account') 'and carries the rule key when one did'
+  Assert-True ("$($Script:ObsEvents[0].summary)".Length -le 120) 'the summary is bounded'
+  Assert-True ("$($Script:ObsEvents[0].summary)" -match 'Failed logon - jsmith') 'and is generated text, not the event body'
+  Assert-True ("$($Script:ObsEvents[1].summary)" -match 'Event 9999') 'an unknown event id still gets a usable label'
+
+  # a secret must never reach the ring buffer, whatever the event carried
+  Add-ObservedEvent 'Security' @{ eventId = '4698'; hostname = 'DC01'; commandLine = 'powershell -enc S3CR3T'; taskContent = 'S3CR3T'; password = 'S3CR3T' } $null $when
+  $last = $Script:ObsEvents[$Script:ObsEvents.Count - 1]
+  $serialised = ($last | ConvertTo-Json -Compress)
+  Assert-True (-not $serialised.Contains('S3CR3T')) 'no field of the raw event (command line, task content, password) reaches the buffer'
+
+  # the cap keeps the newest 300
+  for ($i = 0; $i -lt 320; $i++) {
+    Add-ObservedEvent 'Security' @{ eventId = '4624'; hostname = 'DC02'; accountName = "u$i"; timestamp = $when.AddSeconds($i).ToString('o') } $null ($when.AddSeconds($i))
+  }
+  Assert-True ($Script:ObsEvents.Count -eq $Script:MaxObsEvents) ('the ring buffer is capped at 300 (got ' + $Script:ObsEvents.Count + ')')
+  Assert-True ("$($Script:ObsEvents[$Script:ObsEvents.Count - 1].user)" -eq 'u319') 'and holds the newest entries'
+  Assert-True (@($Script:ObsEvents | Where-Object { "$($_.user)" -eq 'jsmith' }).Count -eq 0) 'the oldest entries are the ones evicted'
+
+  # --- hosts seen ----------------------------------------------------------
+  Reset-Engine
+  Add-ObservedEvent 'Security' @{ eventId = '4625'; hostname = 'DC01'; accountName = 'jsmith'; sourceIp = '10.0.0.7' } $null $when
+  Add-ObservedEvent 'Security' @{ eventId = '4625'; hostname = 'DC01'; accountName = 'jsmith'; sourceIp = '10.0.0.7' } $null $when
+  Add-ObservedEvent 'Security' @{ eventId = '4720'; hostname = 'DC01'; accountName = 'svc'; sourceIp = '10.0.0.8' } $null $when
+  $hosts = Get-HostsPayload
+  Assert-True ($hosts.Count -eq 1) 'one host is tracked'
+  Assert-True ($hosts[0].eventCount -eq 3) 'every event counts toward its host'
+  Assert-True ($hosts[0].users.Count -eq 2) 'users are collected per host'
+  Assert-True ($hosts[0].ips.Count -eq 2) 'and so are source addresses'
+  Assert-True (@($hosts[0].users | Where-Object { $_ -eq 'jsmith' }).Count -eq 1) 'a repeated user is not duplicated'
+  Assert-True ($hosts[0].alertCount -eq 0) 'no alerts counted yet'
+  $al = New-Alert 'account_created' 'seeded' $null @{ hostname = 'DC01'; accountName = 'svc'; eventId = '4720' }
+  $Script:Alerts.Add($al); Add-ObservedAlert $al
+  $hosts = Get-HostsPayload
+  Assert-True ($hosts[0].alertCount -eq 1) 'a raised alert counts toward its host'
+
+  # hosts are capped: the oldest lastSeen is evicted
+  Reset-Engine
+  for ($i = 0; $i -lt 210; $i++) {
+    Add-ObservedEvent 'Security' @{ eventId = '4624'; hostname = "HOST$i" } $null $when.AddSeconds($i)
+  }
+  Assert-True ($Script:ObsHosts.Count -eq $Script:MaxObsHosts) ('the host map is capped at 200 (got ' + $Script:ObsHosts.Count + ')')
+  Assert-True (-not $Script:ObsHosts.ContainsKey('HOST0')) 'the least recently seen host is evicted'
+  Assert-True ($Script:ObsHosts.ContainsKey('HOST209')) 'and the newest is kept'
+
+  # --- hourly buckets ------------------------------------------------------
+  Reset-Engine
+  $base = (Get-Date).AddHours(-5)
+  Add-ObservedEvent 'Security' @{ eventId = '4625'; hostname = 'DC01'; accountName = 'a' } $null $base
+  Add-ObservedEvent 'Security' @{ eventId = '4625'; hostname = 'DC01'; accountName = 'b' } $null $base.AddMinutes(1)
+  $hb = Get-HourBucket $base
+  Assert-True ($hb.events -eq 2) 'events are counted into their hour'
+  Assert-True ($Script:ObsHours.Count -eq 1) 'one bucket so far'
+  $crit = New-Alert 'privilege_escalation' 'seeded crit' $null @{ hostname = 'DC01'; accountName = 'attacker'; eventId = '4728' }
+  $Script:Alerts.Add($crit); Add-ObservedAlert $crit
+  $hb2 = Get-HourBucket (Get-Date)
+  Assert-True ($hb2.alertSev['Critical'] -eq 1) 'alerts are counted by severity into their hour'
+  Assert-True ($hb2.tactics['Privilege Escalation'] -eq 1) 'and by MITRE tactic'
+  Assert-True ($Script:ObsHours.Count -eq 2) 'a later event opens a new bucket'
+  # 24 kept
+  for ($i = 0; $i -lt 30; $i++) { $null = Get-HourBucket ((Get-Date).AddHours(-$i)) }
+  Assert-True ($Script:ObsHours.Count -le 24) ('only the last 24 hourly buckets are kept (got ' + $Script:ObsHours.Count + ')')
+
+  # --- mitre helpers -------------------------------------------------------
+  $mp = Get-MitreParts 'T1098.003 - Account Manipulation'
+  Assert-True ($mp.id -eq 'T1098.003' -and $mp.name -eq 'Account Manipulation') 'a technique id and name are split out'
+  $mp = Get-MitreParts 'T1018 - Remote System Discovery / T1087 - Account Discovery'
+  Assert-True ($mp.id -eq 'T1018' -and $mp.name -eq 'Remote System Discovery') 'a rule naming two techniques reports the first'
+  Assert-True ((Get-MitreParts 'T1078').id -eq 'T1078') 'a bare id still parses'
+  Assert-True ((Get-MitreTactic 'Identity Abuse') -eq 'Privilege Escalation') 'Identity Abuse maps onto a real tactic'
+  Assert-True ((Get-MitreTactic 'Discovery') -eq 'Discovery') 'every other category is already a tactic'
+
+  # --- the alert object a drawer and kill-chain need -----------------------
+  Reset-Engine
+  $a1 = Feed 4728 @{ MemberName = 'attacker'; TargetUserName = 'Domain Admins'; SubjectUserName = 'administrator'; hostname = 'DC01' }
+  Assert-True ($null -ne $a1) 'an alert was raised'
+  foreach ($need in @('Status', 'Acknowledged', 'MitreId', 'MitreName', 'Tactic', 'Entity', 'RuleKey', 'FirstSeen', 'LastSeen', 'Count', 'Events')) {
+    Assert-True ($a1.PSObject.Properties.Name -contains $need) ('   alert exposes ' + $need)
+  }
+  Assert-True ($a1.Status -eq 'New') 'status starts at New (the four-value vocabulary)'
+  Assert-True ($a1.Acknowledged -eq $false) 'acknowledged is a separate boolean'
+  Assert-True ("$($a1.MitreId)" -match '^T\d{4}') 'the MITRE technique id is exposed'
+  Assert-True ("$($a1.MitreName)".Length -gt 0) 'with its name'
+  Assert-True ($a1.Tactic -eq 'Privilege Escalation') 'and the tactic'
+  Assert-True ("$($a1.Entity)" -eq 'attacker') 'the entity it fired on is exposed'
+  Assert-True ($a1.Count -eq 1) 'a new alert counts one contributing event'
+  Assert-True ($a1.Events.Count -eq 1 -and "$($a1.Events[0].summary)".Length -gt 0) 'and carries that event as a summary'
+
+  # a repeat inside the dedupe window contributes instead of duplicating
+  $before = $Script:Alerts.Count
+  $a2 = Feed 4728 @{ MemberName = 'attacker'; TargetUserName = 'Domain Admins'; SubjectUserName = 'administrator'; hostname = 'DC01' }
+  Assert-True ($Script:Alerts.Count -eq $before) 'a deduped repeat does not create a second alert'
+  Assert-True ($a1.Count -eq 2) 'but is counted on the open alert'
+  Assert-True ($a1.Events.Count -eq 2) 'and joins its contributing events (the kill-chain timeline)'
+  Assert-True ("$($a1.LastSeen)" -ge "$($a1.FirstSeen)") 'last-seen moves forward'
+
+  # --- /api/overview ------------------------------------------------------
+  Reset-Engine
+  $ov = Get-OverviewPayload
+  foreach ($need in @('tiles', 'deltas', 'coverage', 'severityCounts', 'tacticCounts', 'hourly', 'lastPoll', 'health', 'version')) {
+    Assert-True ($ov.PSObject.Properties.Name -contains $need) ('   overview has ' + $need)
+  }
+  foreach ($need in @('openAlerts', 'critical', 'high', 'eventsLastHour', 'hostsSeen')) {
+    Assert-True ($ov.tiles.PSObject.Properties.Name -contains $need) ('   tiles have ' + $need)
+    Assert-True ($ov.deltas.PSObject.Properties.Name -contains $need) ('   deltas have ' + $need)
+  }
+  Assert-True ($ov.version -eq $Script:SentinelVersion) 'the overview reports the version'
+  Assert-True ($ov.coverage.rulesTotal -eq $RuleMeta.Count) 'coverage counts every rule family'
+  Assert-True ($ov.coverage.percent -eq 100) 'with the policy unreadable no rule is called blind, so coverage is 100%'
+  Assert-True ($ov.health -eq 'ok') 'and health is ok'
+  Assert-True ((Get-OverviewPayload).tiles.openAlerts -eq 0) 'an idle system has no open alerts'
+
+  # a blind family drops coverage and flips health to blind
+  $gated = @(Get-RuleCatalog | Where-Object { "$($_.auditSubcategory)" } | Select-Object -First 1)
+  $sub = ("$($gated[0].auditSubcategory)" -split ' \+ ')[0].ToLower()
+  $Script:AuditState = @{}
+  $Script:AuditState[$sub] = 'No Auditing'
+  $ovb = Get-OverviewPayload
+  Assert-True ($ovb.coverage.rulesBlind -ge 1) 'a family whose audit subcategory is off is counted blind'
+  Assert-True ($ovb.coverage.percent -lt 100) 'and coverage drops below 100%'
+  Assert-True ($ovb.coverage.rulesWorking -eq ($ovb.coverage.rulesTotal - $ovb.coverage.rulesBlind)) 'working = total - blind'
+  Assert-True ($ovb.coverage.blindRules.Count -ge 1) 'the blind rules are listed for the Rules page'
+  Assert-True ("$($ovb.coverage.blindRules[0].reason)".Length -gt 0) 'each with the reason it cannot fire'
+  Assert-True ($ovb.health -eq 'blind') 'health reports blind when a family cannot fire'
+  $Script:AuditState = $null
+  Assert-True ((Get-OverviewPayload).health -eq 'ok') 'and returns to ok when it can be read again'
+
+  # --- /api/events --------------------------------------------------------
+  Reset-Engine
+  for ($i = 0; $i -lt 5; $i++) {
+    Add-ObservedEvent 'Security' @{ eventId = '4625'; hostname = 'DC01'; accountName = 'jsmith'; sourceIp = '10.0.0.9' } 'brute_force_single_account' $when.AddSeconds($i)
+  }
+  Add-ObservedEvent 'System' @{ eventId = '7045'; hostname = 'DC02'; accountName = 'svc' } 'service_abuse' $when.AddSeconds(9)
+  # NOTE: ",$q" - a bare "return $q" makes PowerShell enumerate the collection
+  # into the pipeline, so the caller receives a string array (or nothing at all)
+  # instead of a query string. That cost a debugging round; do not remove the comma.
+  function New-Query($pairs) {
+    $q = New-Object System.Collections.Specialized.NameValueCollection
+    foreach ($k in $pairs.Keys) { $q.Add($k, "$($pairs[$k])") }
+    return ,$q
+  }
+  $ev = Get-EventsPayload (New-Query @{})
+  Assert-True ($ev.count -eq 6 -and $ev.total -eq 6) 'no filter returns everything'
+  Assert-True ($ev.limit -eq 100) 'with a default limit of 100'
+  Assert-True ("$($ev.events[0].eventId)" -eq '7045') 'newest first'
+  $ev = Get-EventsPayload (New-Query @{ limit = '2' })
+  Assert-True ($ev.count -eq 2 -and $ev.total -eq 6) 'limit slices the rows but still reports the total'
+  $ev = Get-EventsPayload (New-Query @{ limit = '9999' })
+  Assert-True ($ev.limit -eq $Script:MaxObsEvents) 'a limit above the cap is clamped to 300'
+  $ev = Get-EventsPayload (New-Query @{ limit = 'nonsense' })
+  Assert-True ($ev.limit -eq 100) 'a non-numeric limit falls back to the default'
+  $ev = Get-EventsPayload (New-Query @{ limit = '-5' })
+  Assert-True ($ev.limit -eq 100) 'a negative limit falls back to the default'
+  $ev = Get-EventsPayload (New-Query @{ eventId = '4625' })
+  Assert-True ($ev.count -eq 5) 'the eventId filter works'
+  $ev = Get-EventsPayload (New-Query @{ eventId = 'abc' })
+  Assert-True ($ev.status -eq 400 -and $ev.error) 'a non-numeric eventId is refused with 400'
+  $ev = Get-EventsPayload (New-Query @{ host = 'DC02' })
+  Assert-True ($ev.count -eq 1 -and "$($ev.events[0].host)" -eq 'DC02') 'the host filter is exact'
+  $ev = Get-EventsPayload (New-Query @{ user = 'JS' })
+  Assert-True ($ev.count -eq 0) 'the user filter is exact, not a prefix match'
+  $ev = Get-EventsPayload (New-Query @{ user = 'jsmith' })
+  Assert-True ($ev.count -eq 5) 'and matches the real user'
+  $ev = Get-EventsPayload (New-Query @{ q = 'failed logon' })
+  Assert-True ($ev.count -eq 5) 'q is a plain substring match over the summary'
+  $ev = Get-EventsPayload (New-Query @{ q = '.*' })
+  Assert-True ($ev.count -eq 0) 'q is never treated as a regular expression'
+
+  # --- /api/settings must not leak a secret --------------------------------
+  Reset-Engine
+  $st = Get-SettingsPayload
+  Assert-True ($st.version -eq $Script:SentinelVersion) 'settings reports the version'
+  Assert-True ($st.pollSeconds -eq $PollSeconds) 'and the poll interval'
+  Assert-True ($st.rateLimit.maxLoginFailures -eq $Script:MaxLoginFailures) 'the rate limits are exposed'
+  Assert-True ($st.rateLimit.bodyReadMs -eq $Script:BodyReadMs) 'including the body watchdog'
+  Assert-True ($st.users.Count -ge 1) 'the configured accounts are listed'
+  $userFields = @($st.users[0].PSObject.Properties.Name)
+  Assert-True (($userFields -contains 'user') -and ($userFields -contains 'created')) 'each with a name and a creation date'
+  Assert-True ((($userFields -contains 'hash') -or ($userFields -contains 'salt')) -eq $false) 'and nothing else'
+  Assert-True (-not ($st.users.PSObject.Properties.Name -contains 'hash') -and -not ($st.users.PSObject.Properties.Name -contains 'salt')) 'with no hash or salt'
+  $stJson = ($st | ConvertTo-Json -Depth 6 -Compress)
+  foreach ($needle in @($ForwardKey, 'iterations', 'sentinel_session', 'sentinel-users.json')) {
+    if ($needle -and "$needle".Length -gt 3) {
+      Assert-True (-not $stJson.Contains("$needle")) ('   settings output does not contain ' + $needle)
+    }
+  }
+  Assert-True ($st.forwarding.PSObject.Properties.Name -contains 'host') 'forwarding reports a host'
+  Assert-True (-not ($st.forwarding.PSObject.Properties.Name -contains 'url')) 'never the full URL'
+  Assert-True (-not ($st.forwarding.PSObject.Properties.Name -contains 'key')) 'never the key'
+
+  # --- the endpoints exist, are authenticated and are GET-only --------------
+  $web3 = Get-Section $raw $mWeb $mProbes
+  foreach ($ep in @('/api/overview', '/api/events', '/api/hosts', '/api/settings')) {
+    $routePattern = "'^" + $ep + '$' + "' {"
+    Assert-True ($web3.Contains($routePattern)) ("   the handler routes " + $ep)
+  }
+  Assert-True ($web3.Contains('this endpoint is read-only (GET)')) 'the new endpoints are GET-only'
+  Assert-True ($web3.Contains('$ev = Get-EventsPayload $ctx.Request.QueryString')) 'and /api/events is driven by the query string'
+  Assert-True (-not $web3.Contains("'/api/overview'")) 'the new routes are exact matches, not prefixes'
 
   Write-Host ""
   Write-Host "== fixture replay ==" -ForegroundColor Cyan

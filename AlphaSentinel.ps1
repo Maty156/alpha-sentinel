@@ -633,6 +633,18 @@ function Should-Dedupe($ruleKey, $entity, $newSeverity = $null, $newDescription 
           if ($newDescription) { $open.Description = $newDescription }
           $Script:AlertsDirty = $true
         }
+        # This hit did not create a new alert, but it DID contribute to the open
+        # one: the drawer shows the contributing events and the kill-chain
+        # timeline is built from them, so record it (bounded) and restamp.
+        $hitTime = $Script:LastEventTime
+        $hitStamp = if ($hitTime) { $hitTime.ToUniversalTime().ToString("o") } else { (Get-Date).ToUniversalTime().ToString("o") }
+        $open.LastSeen = $hitStamp
+        $open.Count = [int]$open.Count + 1
+        $evts = @($open.Events)
+        $evts += [PSCustomObject]@{ time = $hitStamp; summary = (Get-EventSummary $Script:LastNormFields $ruleKey) }
+        if ($evts.Count -gt $Script:MaxAlertEvents) { $evts = @($evts | Select-Object -Last $Script:MaxAlertEvents) }
+        $open.Events = $evts
+        $Script:AlertsDirty = $true
         return $true
       }
       # no open alert inside the window - the earlier one was acknowledged,
@@ -776,7 +788,23 @@ function New-Alert($ruleKey, $description, $severityOverride, $fields, $dedupeKe
   if (-not $meta) { return $null }
   $sev = if ($severityOverride) { $severityOverride } else { $meta.Severity }
   $stamp = if ($eventTime) { $eventTime.ToUniversalTime().ToString("o") } else { (Get-Date).ToUniversalTime().ToString("o") }
+  # remember that this event matched this rule even when no NEW alert comes out
+  # of it (the dedupe path), so the events feed can say what fired
+  $Script:LastMatchedRule = $ruleKey
+  $mitre = Get-MitreParts "$($meta.Mitre)"
+  # entity = the thing the rule fired on: everything after the rule key in the
+  # dedupe key ("rule|entity"), which is the account, ip, workstation or SPN
+  $entity = ''
+  if ($dedupeKey -and $dedupeKey.Contains('|')) { $entity = $dedupeKey.Substring($dedupeKey.IndexOf('|') + 1) }
   $alert = [PSCustomObject]@{
+    Entity       = $entity
+    MitreId      = $mitre.id
+    MitreName    = $mitre.name
+    Tactic       = Get-MitreTactic "$($meta.Category)"
+    FirstSeen    = $stamp
+    LastSeen     = $stamp
+    Count        = 1
+    Events       = @([PSCustomObject]@{ time = $stamp; summary = (Get-EventSummary $fields $ruleKey) })
     Id           = $Script:NextAlertId
     Time         = $stamp
     RuleKey      = $ruleKey
@@ -803,6 +831,435 @@ function New-Alert($ruleKey, $description, $severityOverride, $fields, $dedupeKe
   $Script:NextAlertId++
   $Script:AlertsDirty = $true
   return $alert
+}
+
+
+# ============================================================
+# DASHBOARD OBSERVABILITY - rolling, in-memory, per process
+# ============================================================
+# Short human phrases per event id, used for the events ring buffer and the
+# "contributing events" list on an alert. Generated text only: the raw event
+# message is never copied anywhere near these structures.
+$EventPhrases = @{
+  '4624' = 'Successful logon'
+  '4625' = 'Failed logon'
+  '4648' = 'Logon with explicit credentials'
+  '4657' = 'Registry value modified'
+  '4662' = 'Directory service access'
+  '4672' = 'Special privileges assigned'
+  '4697' = 'Service installed'
+  '4698' = 'Scheduled task created'
+  '4719' = 'Audit policy changed'
+  '4720' = 'User account created'
+  '4722' = 'User account enabled'
+  '4724' = 'Password reset attempted'
+  '4725' = 'User account disabled'
+  '4726' = 'User account deleted'
+  '4728' = 'Member added to a global group'
+  '4729' = 'Member removed from a global group'
+  '4732' = 'Member added to a local group'
+  '4733' = 'Member removed from a local group'
+  '4738' = 'User account changed'
+  '4740' = 'Account locked out'
+  '4756' = 'Member added to a universal group'
+  '4768' = 'Kerberos TGT requested'
+  '4769' = 'Kerberos service ticket requested'
+  '4771' = 'Kerberos pre-authentication failed'
+  '4776' = 'NTLM credential validation'
+  '4946' = 'Firewall rule added'
+  '4947' = 'Firewall rule modified'
+  '4948' = 'Firewall rule deleted'
+  '4949' = 'Firewall settings restored'
+  '5001' = 'Defender real-time protection disabled'
+  '5010' = 'Defender scanning disabled'
+  '5012' = 'Defender action failed'
+  '5141' = 'Directory object deleted'
+  '7045' = 'Service installed'
+  '1100' = 'Event log service stopped'
+  '1102' = 'Audit log cleared'
+  '4616' = 'System time changed'
+}
+
+# One short line describing an event, for the ring buffer and the kill-chain.
+# Bounded on purpose: a dashboard row is not the place for a 4 KB command line.
+function Get-EventSummary($fields, [string]$ruleKey = '') {
+  if (-not $fields) { return 'event' }
+  $id = "$($fields.eventId)"
+  $phrase = "$($EventPhrases[$id])"
+  if (-not $phrase) { $phrase = 'Event ' + $id }
+  $who = ''
+  if ($fields.accountName) { $who = "$($fields.accountName)" }
+  elseif ($fields.targetUserName) { $who = "$($fields.targetUserName)" }
+  elseif ($fields.subjectUserName) { $who = "$($fields.subjectUserName)" }
+  elseif ($fields.sourceIp) { $who = "$($fields.sourceIp)" }
+  $line = $phrase
+  if ($who) { $line = $line + ' - ' + $who }
+  if ($line.Length -gt 120) { $line = $line.Substring(0, 120) }
+  return $line
+}
+
+# 'T1098.003 - Account Manipulation' -> id + name. A rule can name two
+# techniques separated by ' / ' (ldap_recon): the first is the headline.
+function Get-MitreParts([string]$mitre) {
+  $id = ''
+  $name = ''
+  $text = "$mitre"
+  if ($text -match ' / ') { $text = ($text -split ' / ')[0] }
+  if ($text -match '^\s*(T\d{4}(?:\.\d{3})?)\s*-\s*(.+?)\s*$') { $id = $Matches[1]; $name = $Matches[2] }
+  elseif ($text -match '^\s*(T\d{4}(?:\.\d{3})?)') { $id = $Matches[1] }
+  return [PSCustomObject]@{ id = $id; name = $name }
+}
+
+# The rule catalogue's own Category IS the tactic label this tool files a rule
+# under, with one exception (Identity Abuse is not a MITRE tactic).
+function Get-MitreTactic([string]$category) {
+  if (-not $category) { return 'Uncategorised' }
+  if ($category -eq 'Identity Abuse') { return 'Privilege Escalation' }
+  return $category
+}
+
+# ---- hourly buckets (24 kept) ----------------------------------------------
+function Get-HourBucket($when) {
+  $local = $when.ToLocalTime()
+  $key = $local.ToString("yyyy-MM-ddTHH")
+  if (-not $Script:ObsHours.ContainsKey($key)) {
+    if ($Script:ObsHours.Count -ge 24) {
+      # drop the oldest bucket(s) so the window is always the last 24 hours
+      $keys = @($Script:ObsHours.Keys | Sort-Object)
+      while ($keys.Count -ge 24) {
+        $Script:ObsHours.Remove($keys[0])
+        $keys = @($Script:ObsHours.Keys | Sort-Object)
+      }
+    }
+    $Script:ObsHours[$key] = [PSCustomObject]@{
+      key         = $key
+      hour        = $local.ToString("HH:00")
+      stamp       = $local.ToString("o")
+      events      = 0
+      alertSev    = @{ Critical = 0; High = 0; Medium = 0; Low = 0 }
+      tactics     = @{}
+      # the tile values when this hour STARTED, so the dashboard can show a delta
+      startTiles  = $null
+    }
+  }
+  return $Script:ObsHours[$key]
+}
+
+# ---- hosts seen ------------------------------------------------------------
+function Update-HostSeen($fields, [bool]$isAlert) {
+  if (-not $fields) { return }
+  $h = "$($fields.hostname)"
+  if (-not $h) { return }
+  $now = (Get-Date).ToUniversalTime().ToString("o")
+  if (-not $Script:ObsHosts.ContainsKey($h)) {
+    $Script:ObsHosts[$h] = [PSCustomObject]@{
+      host       = $h
+      firstSeen  = $now
+      lastSeen   = $now
+      eventCount = 0
+      alertCount = 0
+      users      = @()
+      ips        = @()
+    }
+  }
+  $rec = $Script:ObsHosts[$h]
+  $rec.lastSeen = $now
+  if ($isAlert) { $rec.alertCount = [int]$rec.alertCount + 1 } else { $rec.eventCount = [int]$rec.eventCount + 1 }
+  $u = "$($fields.accountName)"
+  if (-not $u) { $u = "$($fields.subjectUserName)" }
+  if ($u -and $u -ne '') {
+    $users = @($rec.users)
+    if ($users -notcontains $u) {
+      $users += $u
+      if ($users.Count -gt $Script:MaxObsHostUsers) { $users = @($users | Select-Object -Last $Script:MaxObsHostUsers) }
+      $rec.users = $users
+    }
+  }
+  $ip = "$($fields.sourceIp)"
+  if ($ip -and $ip -ne '' -and $ip -ne '-') {
+    $ips = @($rec.ips)
+    if ($ips -notcontains $ip) {
+      $ips += $ip
+      if ($ips.Count -gt $Script:MaxObsHostIps) { $ips = @($ips | Select-Object -Last $Script:MaxObsHostIps) }
+      $rec.ips = $ips
+    }
+  }
+  # evict the hosts we have not seen for the longest, so a busy DC cannot grow
+  # the map without bound
+  if ($Script:ObsHosts.Count -gt $Script:MaxObsHosts) {
+    $excess = $Script:ObsHosts.Count - $Script:MaxObsHosts
+    $oldest = @($Script:ObsHosts.Values | Sort-Object lastSeen | Select-Object -First $excess)
+    foreach ($o in $oldest) { $Script:ObsHosts.Remove($o.host) }
+  }
+}
+
+# ---- one observed (normalised) event ---------------------------------------
+function Add-ObservedEvent($channel, $fields, $matchedRule, $when = $null) {
+  if (-not $fields) { return }
+  $ts = $when
+  if (-not $ts) { $ts = Get-Date }
+  $user = "$($fields.accountName)"
+  if (-not $user) { $user = "$($fields.subjectUserName)" }
+  if (-not $user) { $user = "$($fields.targetUserName)" }
+  $entry = [PSCustomObject]@{
+    time        = $ts.ToUniversalTime().ToString("o")
+    eventId     = "$($fields.eventId)"
+    channel     = "$channel"
+    host        = "$($fields.hostname)"
+    user        = $user
+    sourceIp    = "$($fields.sourceIp)"
+    summary     = Get-EventSummary $fields "$matchedRule"
+    matchedRule = if ($matchedRule) { "$matchedRule" } else { $null }
+  }
+  $Script:ObsEvents.Add($entry)
+  while ($Script:ObsEvents.Count -gt $Script:MaxObsEvents) { $Script:ObsEvents.RemoveAt(0) }
+  $hb = Get-HourBucket $ts
+  if ($null -eq $hb.startTiles) { $hb.startTiles = Get-TileSnapshot }
+  $hb.events = [int]$hb.events + 1
+  Update-HostSeen $fields $false
+}
+
+# ---- one raised alert ------------------------------------------------------
+function Add-ObservedAlert($alert) {
+  if (-not $alert) { return }
+  if ($alert.SelfTest) { return }   # synthetic rows are not coverage
+  $ts = Get-Date
+  if ($alert.Time) { try { $ts = [datetime]::Parse("$($alert.Time)") } catch { $ts = Get-Date } }
+  $hb = Get-HourBucket $ts
+  if ($null -eq $hb.startTiles) { $hb.startTiles = Get-TileSnapshot }
+  $sev = "$($alert.Severity)"
+  if ($hb.alertSev.ContainsKey($sev)) { $hb.alertSev[$sev] = [int]$hb.alertSev[$sev] + 1 }
+  $tactic = "$($alert.Tactic)"
+  if (-not $tactic) { $tactic = 'Uncategorised' }
+  $hb.tactics[$tactic] = [int]$hb.tactics[$tactic] + 1
+  if ($null -eq $hb.startTiles) { $hb.startTiles = Get-TileSnapshot }
+  Update-HostSeen @{ hostname = "$($alert.Host)"; accountName = "$($alert.Account)"; sourceIp = "$($alert.SourceIp)" } $true
+}
+
+# ---- the tile values, used for the deltas ---------------------------------
+function Get-TileSnapshot {
+  # NOTE: read the current bucket if it exists rather than calling Get-HourBucket,
+  # which would CREATE one - a snapshot taken at the start of an hour used to open
+  # an empty bucket for the current hour and show up as a phantom row on the chart
+  $open = @($Script:Alerts | Where-Object { -not $_.SelfTest -and ($_.Status -eq 'New' -or $_.Status -eq 'Investigating' -or -not $_.Status) })
+  $crit = @($open | Where-Object { $_.Severity -eq 'Critical' }).Count
+  $high = @($open | Where-Object { $_.Severity -eq 'High' }).Count
+  $eventsThisHour = 0
+  $key = (Get-Date).ToLocalTime().ToString("yyyy-MM-ddTHH")
+  if ($Script:ObsHours.ContainsKey($key)) { $eventsThisHour = [int]$Script:ObsHours[$key].events }
+  return [PSCustomObject]@{
+    openAlerts    = $open.Count
+    critical      = $crit
+    high          = $high
+    eventsLastHour = $eventsThisHour
+    hostsSeen     = $Script:ObsHosts.Count
+  }
+}
+
+# ---- the payloads the new dashboard reads ---------------------------------
+# Each is a plain object so the suite can assert its shape without HTTP.
+function Get-OverviewPayload {
+  $nonSelf = @($Script:Alerts | Where-Object { -not $_.SelfTest })
+  $open = @($nonSelf | Where-Object { $_.Status -eq 'New' -or $_.Status -eq 'Investigating' -or -not $_.Status })
+  $tiles = Get-TileSnapshot
+  $tiles.openAlerts = $open.Count
+  $tiles.critical = @($open | Where-Object { $_.Severity -eq 'Critical' }).Count
+  $tiles.high = @($open | Where-Object { $_.Severity -eq 'High' }).Count
+
+  # deltas: against the same values when the PREVIOUS hour bucket started
+  $keys = @($Script:ObsHours.Keys | Sort-Object)
+  $prevTiles = $null
+  if ($keys.Count -ge 2) { $prevTiles = $Script:ObsHours[$keys[$keys.Count - 2]].startTiles }
+  $delta = [PSCustomObject]@{ openAlerts = 0; critical = 0; high = 0; eventsLastHour = 0; hostsSeen = 0 }
+  if ($prevTiles) {
+    $delta.openAlerts = [int]$tiles.openAlerts - [int]$prevTiles.openAlerts
+    $delta.critical = [int]$tiles.critical - [int]$prevTiles.critical
+    $delta.high = [int]$tiles.high - [int]$prevTiles.high
+    $delta.eventsLastHour = [int]$tiles.eventsLastHour - [int]$prevTiles.eventsLastHour
+    $delta.hostsSeen = [int]$tiles.hostsSeen - [int]$prevTiles.hostsSeen
+  } elseif ($keys.Count -eq 1) {
+    $delta.eventsLastHour = [int]$tiles.eventsLastHour
+  }
+
+  # coverage = rules that are not BLIND, from the existing audit preflight
+  $rules = @(Get-RuleCatalog)
+  $blind = @($rules | Where-Object { $_.auditState -eq 'blind' })
+  $total = $rules.Count
+  $working = $total - $blind.Count
+  $percent = 100
+  if ($total -gt 0) { $percent = [int][Math]::Round((100.0 * $working) / $total) }
+
+  $sevCounts = @{ Critical = 0; High = 0; Medium = 0; Low = 0 }
+  foreach ($a in $nonSelf) {
+    $s = "$($a.Severity)"
+    if ($sevCounts.ContainsKey($s)) { $sevCounts[$s] = [int]$sevCounts[$s] + 1 }
+  }
+  $tacticCounts = @{}
+  foreach ($a in $nonSelf) {
+    $t = "$($a.Tactic)"
+    if (-not $t) { $t = Get-MitreTactic "$($a.Category)" }
+    $tacticCounts[$t] = [int]$tacticCounts[$t] + 1
+  }
+
+  $hourly = @()
+  foreach ($k in $keys) {
+    $b = $Script:ObsHours[$k]
+    $hourly += [PSCustomObject]@{
+      hour   = $b.hour
+      events = [int]$b.events
+      alerts = [int]$b.alertSev['Critical'] + [int]$b.alertSev['High'] + [int]$b.alertSev['Medium'] + [int]$b.alertSev['Low']
+    }
+  }
+
+  $catch = Get-CatchUpState $Script:LagSeconds
+  $blindCount = $blind.Count
+  $health = 'ok'
+  if ($blindCount -gt 0) { $health = 'blind' }
+  elseif ($catch.catchingUp -or $Script:EvalErrors -gt 0 -or $Script:LagSeconds -gt 120) { $health = 'degraded' }
+
+  return [PSCustomObject]@{
+    tiles = [PSCustomObject]@{
+      openAlerts = [int]$tiles.openAlerts
+      critical   = [int]$tiles.critical
+      high       = [int]$tiles.high
+      eventsLastHour = [int]$tiles.eventsLastHour
+      hostsSeen  = [int]$tiles.hostsSeen
+    }
+    deltas = $delta
+    coverage = [PSCustomObject]@{
+      percent     = $percent
+      rulesTotal  = $total
+      rulesWorking = $working
+      rulesBlind  = $blindCount
+      blindRules  = @($blind | ForEach-Object { [PSCustomObject]@{ id = $_.key; name = $_.title; reason = $_.auditDetail } })
+    }
+    severityCounts = $sevCounts
+    tacticCounts   = $tacticCounts
+    hourly         = $hourly
+    lastPoll = [PSCustomObject]@{ lagSeconds = [int]$Script:LagSeconds; catchingUp = $catch.catchingUp; capped = $catch.capped }
+    health  = $health
+    version = $Script:SentinelVersion
+  }
+}
+
+# Reads one query-string value without ever throwing on a missing key or a
+# missing collection (indexing $null is an error in PowerShell).
+function Get-QueryValue($query, [string]$name) {
+  if ($null -eq $query) { return '' }
+  try {
+    $v = $query[$name]
+    if ($null -eq $v) { return '' }
+    return "$v"
+  } catch {
+    return ''
+  }
+}
+
+# /api/events - newest first, validated filters, plain substring search
+function Get-EventsPayload($query) {
+  $limit = 100
+  $rawLimit = Get-QueryValue $query 'limit'
+  if ($rawLimit) {
+    $parsed = 0
+    if ([int]::TryParse($rawLimit, [ref]$parsed)) {
+      if ($parsed -gt 0) { $limit = $parsed }
+      if ($limit -gt $Script:MaxObsEvents) { $limit = $Script:MaxObsEvents }
+    }
+  }
+  $filterId = Get-QueryValue $query 'eventId'
+  $badId = $false
+  if ($filterId) { if ($filterId -notmatch '^\d{1,10}$') { $badId = $true } }
+  $filterHost = Get-QueryValue $query 'host'
+  $filterUser = Get-QueryValue $query 'user'
+  $filterQ = Get-QueryValue $query 'q'
+  if ($filterHost.Length -gt 120) { $filterHost = $filterHost.Substring(0, 120) }
+  if ($filterUser.Length -gt 120) { $filterUser = $filterUser.Substring(0, 120) }
+  if ($filterQ.Length -gt 120) { $filterQ = $filterQ.Substring(0, 120) }
+
+  # [object[]] cast, not @(...): wrapping a generic List directly with the array
+  # subexpression operator is unreliable (it throws "Argument types do not match"
+  # on some hosts), and the cast behaves identically on 5.1 and 7.
+  $rows = [object[]]$Script:ObsEvents
+  if ($badId) {
+    return [PSCustomObject]@{ error = 'eventId must be digits.'; status = 400; events = @(); count = 0; total = 0; limit = $limit }
+  }
+  if ($filterId) { $rows = @($rows | Where-Object { $_.eventId -eq $filterId }) }
+  if ($filterHost) { $rows = @($rows | Where-Object { "$($_.host)".ToLower() -eq $filterHost.ToLower() }) }
+  if ($filterUser) { $rows = @($rows | Where-Object { "$($_.user)".ToLower() -eq $filterUser.ToLower() }) }
+  if ($filterQ) {
+    # plain substring, never a regular expression (a filter is not code)
+    $needle = $filterQ.ToLower()
+    $rows = @($rows | Where-Object {
+      ("$($_.summary)".ToLower().Contains($needle)) -or
+      ("$($_.host)".ToLower().Contains($needle)) -or
+      ("$($_.user)".ToLower().Contains($needle)) -or
+      ("$($_.eventId)".ToLower().Contains($needle))
+    })
+  }
+  $total = $rows.Count
+  $newest = @($rows | Sort-Object time -Descending)
+  if ($newest.Count -gt $limit) { $newest = @($newest | Select-Object -First $limit) }
+  return [PSCustomObject]@{ events = $newest; count = $newest.Count; total = $total; limit = $limit }
+}
+
+function Get-HostsPayload {
+  # busiest first: alerts dominate, events break the tie (PowerShell cannot sort
+  # one key ascending and the next descending in a single pass)
+  return @($Script:ObsHosts.Values |
+    Sort-Object -Property @{ e = { ([int]$_.alertCount * 1000000) + [int]$_.eventCount } } -Descending)
+}
+
+function Get-SettingsPayload {
+  # READ-ONLY, and deliberately narrow: names and dates, never a credential. The
+  # forwarding key, the password hashes, the salts and the session ids have no
+  # path into this object.
+  $users = @()
+  $store = Get-UserStore
+  if ($store -and $store.users) {
+    foreach ($u in @($store.users)) {
+      # the store keeps ISO-8601, but ConvertFrom-Json turns it into a DateTime and
+      # "$(...)" would then print it in the server's locale - keep it ISO
+      $created = "$($u.created)"
+      try { $created = ([datetime]$u.created).ToUniversalTime().ToString("o") } catch { }
+      $users += [PSCustomObject]@{ user = "$($u.user)"; created = $created }
+    }
+  }
+  $fwdHost = ''
+  if ($ForwardUrl) { try { $fwdHost = ([uri]$ForwardUrl).Host } catch { $fwdHost = '' } }
+  $pre = Get-PreflightReport
+  return [PSCustomObject]@{
+    version      = $Script:SentinelVersion
+    pollSeconds  = $PollSeconds
+    bind         = "$Bind"
+    port         = $Port
+    sessionHours = $Script:SessionHours
+    idleMinutes  = $Script:IdleMinutes
+    rateLimit    = [PSCustomObject]@{
+      maxLoginFailures = $Script:MaxLoginFailures
+      windowMinutes    = $Script:LoginWindowMinutes
+      blockMinutes     = $Script:LoginBlockMinutes
+      maxBodyStalls    = $Script:MaxBodyStalls
+      bodyReadMs       = $Script:BodyReadMs
+      maxLoginBodyBytes = $Script:MaxLoginBodyBytes
+      maxJsonBodyBytes  = $Script:MaxJsonBodyBytes
+    }
+    forwarding   = [PSCustomObject]@{
+      enabled       = [bool]$ForwardUrl
+      host          = $fwdHost
+      keyConfigured = [bool]$ForwardKey
+    }
+    audit        = [PSCustomObject]@{
+      checkedAt   = $pre.checkedAt
+      readable    = $pre.readable
+      rulesTotal  = $pre.rulesTotal
+      okCount     = $pre.okCount
+      blindCount  = $pre.blindCount
+      unknownCount = $pre.unknownCount
+      fix         = @($pre.fix)
+    }
+    users        = $users
+    usersFileState = (Get-UsersFileState).reason
+  }
 }
 
 # ---- request body limits (web DoS guard) ----------------------------------
@@ -872,6 +1329,27 @@ $Script:BodyTimedOut = $false   # true for the CURRENT request only
 $Script:BodyReadMs = 2000       # how long a client may take to send its body
 $Script:MaxBodyStalls = 3       # stalls from one address before it is blocked
 $Script:BodyStalls = @{}        # ip -> stalls seen (in-memory, per process)
+
+# ---- ALPHA SENTINEL version ------------------------------------------------
+$Script:SentinelVersion = '2.3'
+
+# ---- dashboard observability state -----------------------------------------
+# EVERYTHING BELOW IS IN MEMORY AND RESETS WITH THE PROCESS. That is deliberate:
+# it is a rolling window for the dashboard, not a second copy of the alert
+# history (sentinel-history.csv owns durability). Nothing here ever stores a raw
+# event message body, a credential or a secret - only the normalised fields the
+# engine already parsed, plus a generated one-line summary.
+$Script:ObsEvents = New-Object System.Collections.Generic.List[object]  # ring buffer
+$Script:ObsHosts = @{}          # host -> @{ firstSeen; lastSeen; eventCount; alertCount; users; ips }
+$Script:ObsHours = @{}          # 'yyyy-MM-ddTHH' -> hourly bucket
+$Script:MaxObsEvents = 300      # ring buffer length
+$Script:MaxObsHosts = 200       # hosts kept (oldest lastSeen evicted)
+$Script:MaxObsHostUsers = 40    # per host
+$Script:MaxObsHostIps = 20      # per host
+$Script:MaxAlertEvents = 20     # contributing events kept per alert
+$Script:LastNormFields = $null  # stash: the event being evaluated
+$Script:LastEventTime = $null
+$Script:LastMatchedRule = $null
 
 # Decides whether a request body may be read AT ALL, without reading it.
 # Returns $null when it may, or @{ Status; Message } when the request must be
@@ -1104,6 +1582,9 @@ function Evaluate-Event($e) {
   $f = Get-NormalizedEvent $e
   if (-not $f) { return $null }
   $id = [int]$f.eventId
+  # the observers (events ring buffer, hosts seen, contributing events) read the
+  # normalised fields from here rather than parsing the XML a second time
+  $Script:LastNormFields = $f
 
   # Every rolling window is stamped with the EVENT's own time, not the moment
   # this event happened to be parsed. The old code used Get-Date for both the
@@ -1113,6 +1594,7 @@ function Evaluate-Event($e) {
   if ($f.timestamp) {
     try { $evtTime = ([datetime]::Parse("$($f.timestamp)")).ToUniversalTime() } catch { }
   }
+  $Script:LastEventTime = $evtTime
 
   switch ($id) {
 
@@ -2346,7 +2828,11 @@ function Start-WebServer {
 # it, and re-serialising it for every alert on every 10-second poll of every
 # open tab was most of /api/alerts' cost.
 function Get-AlertRows {
-  return @($Script:Alerts | Select-Object Id, Time, RuleKey, Rule, Severity, Title, Mitre, Remediation, Description, Host, Account, SourceIp, EventId, Acknowledged, Status, Notes, SelfTest)
+  # Fields (the full normalised event kept for web forwarding) is still NOT
+  # serialised; the drawer gets the bounded contributing-event summaries instead.
+  return @($Script:Alerts | Select-Object Id, Time, RuleKey, Rule, Severity, Title, Mitre,
+    MitreId, MitreName, Tactic, Entity, Remediation, Description, Host, Account, SourceIp,
+    EventId, Acknowledged, Status, Notes, SelfTest, FirstSeen, LastSeen, Count, Events)
 }
 
 # Handle a single HTTP request context. Called from the MAIN thread loop -
@@ -2579,6 +3065,26 @@ function Invoke-Handler($ctx) {
           auditBlind          = @(Get-RuleCatalog | Where-Object { $_.auditState -eq 'blind' }).Count
           uptimeSeconds       = $uptime
         } | ConvertTo-Json -Depth 4)
+      }
+      # ---- v2.3 read-only dashboard API (GET, session required, JSON) --------
+      '^/api/overview$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        Send-Json $res ((Get-OverviewPayload) | ConvertTo-Json -Depth 6)
+      }
+      '^/api/events$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        $ev = Get-EventsPayload $ctx.Request.QueryString
+        if ($ev.error) { Send-Json $res ('{"error":"' + $ev.error + '"}') $ev.status; return }
+        Send-Json $res ('{"events":' + (ConvertTo-JsonArray $ev.events) +
+                        ',"count":' + $ev.count + ',"total":' + $ev.total + ',"limit":' + $ev.limit + '}')
+      }
+      '^/api/hosts$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        Send-Json $res (ConvertTo-JsonArray (Get-HostsPayload))
+      }
+      '^/api/settings$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        Send-Json $res ((Get-SettingsPayload) | ConvertTo-Json -Depth 6)
       }
       '^/api/alerts$' {
         # No query string -> serve the cached payload (rebuilt only when an
@@ -3106,6 +3612,7 @@ function Invoke-ChannelBatch($channel, $events, $cap) {
     }
     $evaluated++
     $alert = $null
+    $Script:LastMatchedRule = $null
     try {
       $alert = Evaluate-Event $e
     } catch {
@@ -3114,10 +3621,15 @@ function Invoke-ChannelBatch($channel, $events, $cap) {
       $Script:LastEvalError = "event $($e.Id) record $recId : $($_.Exception.Message)"
       continue
     }
+    # ---- observability: the event is recorded whether or not it alerted, and
+    # ---- LastMatchedRule is set by the rule path, so a dedupe-suppressed hit
+    # ---- still reports which rule it fired
+    Add-ObservedEvent $channel $Script:LastNormFields $Script:LastMatchedRule $Script:LastEventTime
     if ($alert) {
       $Script:Alerts.Add($alert)
       $Script:ProcessedCount++
       $alerts++
+      Add-ObservedAlert $alert
       Forward-ToWeb $alert
     }
   }
