@@ -810,9 +810,68 @@ function New-Alert($ruleKey, $description, $severityOverride, $fields, $dedupeKe
 # unbounded read is a denial of service: one client can hold the only thread
 # while it dribbles a body in. The login route carries a username and a
 # password, so it gets a much smaller budget than the triage routes.
+# ---- stalled-body watchdog (C#) --------------------------------------------
+# TimeoutManager is enforced by HTTP.sys, and this server does not always run on
+# it: under the MANAGED listener a client that declares a Content-Length and then
+# sends nothing parks ReadToEnd() until the connection dies - and this server has
+# ONE thread, so the dashboard AND the event poll stop with it. Measured: a 25 s
+# hold = 5 failed health probes.
+#
+# This helper reads the body on its own dedicated thread and gives up after a
+# timeout, so a stalled socket costs the loop a bounded pause instead of the
+# whole connection lifetime. (ReadAsync + Wait was measured at ~5 s per stall; a
+# LongRunning thread measured ~1.5 s for the first stall and ~0.25 s after.)
+if (-not ('SentinelBody' -as [type])) {
+  $sentinelBodySource = @'
+using System;
+using System.IO;
+using System.Threading.Tasks;
+
+public static class SentinelBody
+{
+    // Reads exactly len bytes, or returns null when the client stalls past
+    // timeoutMs or the stream ends early. The read runs on a dedicated thread so
+    // the caller can walk away from a socket that is never going to finish.
+    public static byte[] Read(Stream s, int len, int timeoutMs)
+    {
+        if (s == null || len < 0) { return null; }
+        if (len == 0) { return new byte[0]; }
+        byte[] buffer = new byte[len];
+        int total = 0;
+        Task t = Task.Factory.StartNew(delegate()
+        {
+            try
+            {
+                while (total < len)
+                {
+                    int n = s.Read(buffer, total, len - total);
+                    if (n <= 0) { break; }
+                    total += n;
+                }
+            }
+            catch (Exception) { total = -1; }
+        }, TaskCreationOptions.LongRunning);
+        try
+        {
+            if (!t.Wait(timeoutMs)) { return null; }
+        }
+        catch (Exception) { return null; }
+        if (total != len) { return null; }
+        return buffer;
+    }
+}
+'@
+  Add-Type -TypeDefinition $sentinelBodySource -Language CSharp
+}
+
 $Script:MaxLoginBodyBytes = 8192
 $Script:MaxJsonBodyBytes  = 65536
-$Script:BodyRejections = 0
+$Script:BodyRejections = 0      # refused before reading (411/413)
+$Script:BodyTimeouts = 0        # abandoned mid-read: the client stalled
+$Script:BodyTimedOut = $false   # true for the CURRENT request only
+$Script:BodyReadMs = 2000       # how long a client may take to send its body
+$Script:MaxBodyStalls = 3       # stalls from one address before it is blocked
+$Script:BodyStalls = @{}        # ip -> stalls seen (in-memory, per process)
 
 # Decides whether a request body may be read AT ALL, without reading it.
 # Returns $null when it may, or @{ Status; Message } when the request must be
@@ -853,13 +912,31 @@ function Test-BodyAllowed($ctx, [int]$MaxBytes) {
 # this function simply refuses to read.
 function Read-JsonBody($ctx, [int]$MaxBytes = 0) {
   if ($MaxBytes -le 0) { $MaxBytes = $Script:MaxJsonBodyBytes }
+  # the flag always describes the read that is about to happen, so a caller that
+  # reads a body twice (or a later request on the same connection) cannot see a
+  # timeout that belonged to an earlier one
+  $Script:BodyTimedOut = $false
   try {
     if (Test-BodyAllowed $ctx $MaxBytes) { return $null }
     $declared = [int64]$ctx.Request.ContentLength64
     if ($declared -eq 0) { return $null }
-    $reader = New-Object System.IO.StreamReader($ctx.Request.InputStream, $ctx.Request.ContentEncoding)
-    $text = $reader.ReadToEnd()
-    $reader.Close()
+    # Read-JsonBody used to call ReadToEnd(), which blocks until the client
+    # finishes - forever, if it never does. SentinelBody::Read takes the declared
+    # length, reads it on a dedicated thread, and returns $null if the client
+    # stalls past $Script:BodyReadMs or closes early.
+    $bytes = [SentinelBody]::Read($ctx.Request.InputStream, [int]$declared, $Script:BodyReadMs)
+    if ($null -eq $bytes) {
+      # Declared a length, then went quiet. That is an attempt to hold the
+      # single web thread, not a malformed request: abort the connection so the
+      # socket is not left half-read and the next request on it cannot be
+      # desynchronised. The caller decides what it means (the login route counts
+      # it as a failed sign-in).
+      $Script:BodyTimedOut = $true
+      $Script:BodyTimeouts++
+      try { $ctx.Response.Abort() } catch { }
+      return $null
+    }
+    $text = $ctx.Request.ContentEncoding.GetString($bytes)
     if (-not $text) { return $null }
     return ($text | ConvertFrom-Json)
   } catch {
@@ -2077,6 +2154,29 @@ function Register-LoginFailure([string]$Ip) {
   return $rec
 }
 
+# A stalled body is not a slow client, it is an attempt to freeze a
+# single-threaded server: $Script:MaxBodyStalls of them from one address and that
+# address is blocked for the same window a password sweep would earn it. The
+# stall is ALSO registered as a login failure, so it counts toward the 5-failure
+# rate limit as well.
+function Register-BodyStall([string]$Ip) {
+  if (-not $Ip) { return 0 }
+  $n = 0
+  if ($Script:BodyStalls.ContainsKey($Ip)) { $n = [int]$Script:BodyStalls[$Ip] }
+  $n++
+  $Script:BodyStalls[$Ip] = $n
+  if ($n -ge $Script:MaxBodyStalls) {
+    $now = Get-Date
+    if (-not $Script:LoginFailures.ContainsKey($Ip)) {
+      $Script:LoginFailures[$Ip] = [PSCustomObject]@{ Count = 0; First = $now; BlockedUntil = $null }
+    }
+    $rec = $Script:LoginFailures[$Ip]
+    $rec.BlockedUntil = $now.AddMinutes($Script:LoginBlockMinutes)
+    if ([int]$rec.Count -lt $Script:MaxLoginFailures) { $rec.Count = $Script:MaxLoginFailures }
+  }
+  return $n
+}
+
 function Reset-LoginFailures([string]$Ip) {
   if ($Script:LoginFailures.ContainsKey($Ip)) { $Script:LoginFailures.Remove($Ip) }
 }
@@ -2272,6 +2372,13 @@ function Invoke-Handler($ctx) {
   $path = $ctx.Request.Url.AbsolutePath
   $method = "$($ctx.Request.HttpMethod)"
   $res = $ctx.Response
+  # per-request flag: whether THIS request's body was abandoned mid-read
+  $Script:BodyTimedOut = $false
+  # The client address is captured BEFORE anything can abort the connection:
+  # aborting a stalled body makes RemoteEndPoint unavailable, so reading it
+  # afterwards filed the attack under "unknown" and left the real source
+  # unblocked and unlogged.
+  $clientIp = Get-ClientAddress $ctx
   try {
     # ---- DNS-rebinding guard: on a loopback bind only loopback Host names
     $allowed = Test-HostAllowed $ctx
@@ -2295,6 +2402,10 @@ function Invoke-Handler($ctx) {
     # ---- Content-Length and it must fit the endpoint's budget; a chunked or
     # ---- length-less body is refused with 411 because its size is only
     # ---- knowable by reading it, which is the DoS this prevents.
+    # ---- the body is read ONCE here, so the 411/413 decision and the stalled
+    # ---- client watchdog happen in one place for every POST route. Routes use
+    # ---- $bodyParsed instead of reading again (which would also re-drain).
+    $bodyParsed = $null
     if ($isApi -and $method -eq 'POST') {
       $bodyLimit = $Script:MaxJsonBodyBytes
       if ($path -eq '/api/login') { $bodyLimit = $Script:MaxLoginBodyBytes }
@@ -2302,6 +2413,25 @@ function Invoke-Handler($ctx) {
       if ($bodyReject) {
         $Script:BodyRejections++
         Send-Json $res ('{"error":"' + $bodyReject.Message + '"}') $bodyReject.Status
+        return
+      }
+      $bodyParsed = Read-JsonBody $ctx $bodyLimit
+      if ($Script:BodyTimedOut) {
+        # Read-JsonBody already counted the timeout and aborted the connection.
+        $stallIp = $clientIp
+        $stalls = Register-BodyStall $stallIp
+        if ($path -eq '/api/login') {
+          [void](Register-LoginFailure $stallIp)
+          Write-AuthEvent $stallIp '' 'failure' 'request body stalled - connection aborted'
+        } else {
+          $stallUser = ''
+          if (Test-Authenticated $ctx) { $stallUser = Get-SessionUser $ctx }
+          Write-AuthEvent $stallIp $stallUser 'failure' 'request body stalled - connection aborted'
+        }
+        if ($stalls -ge $Script:MaxBodyStalls) {
+          Write-AuthEvent $stallIp '' 'blocked' ("body stalls from this address reached " + $stalls)
+        }
+        # the socket is being aborted: there is nothing left to answer on
         return
       }
     }
@@ -2339,7 +2469,7 @@ function Invoke-Handler($ctx) {
         if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - sign in with POST."}' 405; return }
         if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
 
-        $ip = Get-ClientAddress $ctx
+        $ip = $clientIp
         # brute-force gate: 5 failures per IP per 5 minutes, then 429 for 5 min
         if (-not (Test-LoginAllowed $ip)) {
           $retry = Get-LoginRetryAfter $ip
@@ -2349,7 +2479,7 @@ function Invoke-Handler($ctx) {
           return
         }
 
-        $body = Read-JsonBody $ctx $Script:MaxLoginBodyBytes
+        $body = $bodyParsed   # read once, above
         $userName = ''
         $password = ''
         if ($body) {
@@ -2382,7 +2512,7 @@ function Invoke-Handler($ctx) {
         $who = Get-SessionUser $ctx
         Remove-Session $sid
         $res.Headers.Add('Set-Cookie', 'sentinel_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0')
-        Write-AuthEvent (Get-ClientAddress $ctx) $who 'logout' 'session destroyed'
+        Write-AuthEvent $clientIp $who 'logout' 'session destroyed'
         Send-Json $res '{"ok":true}'
       }
       '^/api/session$' {
@@ -2440,6 +2570,7 @@ function Invoke-Handler($ctx) {
           evalErrors          = $Script:EvalErrors
           pollErrors          = $Script:PollErrors
           bodyRejections      = $Script:BodyRejections
+          bodyTimeouts        = $Script:BodyTimeouts
           lastEvalError       = "$($Script:LastEvalError)"
           lastPollError       = "$($Script:LastPollError)"
           channels            = $channels
@@ -2503,7 +2634,7 @@ function Invoke-Handler($ctx) {
         Send-Json $res ((Get-PreflightReport) | ConvertTo-Json -Depth 6)
       }
       '^/api/alerts/(\d+)/ack$' {
-        $null = Read-JsonBody $ctx   # drain the body (see Read-JsonBody note)
+        $null = $bodyParsed   # the body was read (and drained) above
         $alert = $Script:Alerts | Where-Object { $_.Id -eq [int]$Matches[1] } | Select-Object -First 1
         if ($alert) {
           $alert.Acknowledged = $true
@@ -2513,7 +2644,7 @@ function Invoke-Handler($ctx) {
         } else { Send-Json $res '{"error":"Alert not found."}' 404 }
       }
       '^/api/alerts/(\d+)/unack$' {
-        $null = Read-JsonBody $ctx   # drain the body (see Read-JsonBody note)
+        $null = $bodyParsed   # the body was read (and drained) above
         $alert = $Script:Alerts | Where-Object { $_.Id -eq [int]$Matches[1] } | Select-Object -First 1
         if ($alert) {
           $alert.Acknowledged = $false
@@ -2531,7 +2662,7 @@ function Invoke-Handler($ctx) {
         if (-not $alert) {
           Send-Json $res '{"error":"Alert not found."}' 404
         } else {
-          $body = Read-JsonBody $ctx
+          $body = $bodyParsed   # read once, above
           if ($body) {
             if ($body.status -and ($AlertStatuses -contains "$($body.status)")) {
               $alert.Status = "$($body.status)"
@@ -2577,7 +2708,7 @@ function Invoke-Handler($ctx) {
         # block, so a probe that throws can no longer wipe the live windows, and
         # the alerts are tagged SelfTest so they stay out of the coverage counts
         # and out of the engagement CSV export.
-        $null = Read-JsonBody $ctx   # drain the body (see Read-JsonBody note)
+        $null = $bodyParsed   # the body was read (and drained) above
         $savedTimes = $Script:RecentAlertTimes
         $savedWindows = $Script:Windows
         $savedDedupe = $Script:DedupeAlertId

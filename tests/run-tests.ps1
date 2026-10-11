@@ -18,7 +18,9 @@ Covered:
   7. backlog catch-up: a 5000-event backlog drains without loss or duplicates
   8. the XPath pre-filter: well-formed, a superset of what the engine needs,
      and the fallback when the provider rejects it
-  9. v2.2 hardening: the request-body DoS guard (411/413 before any read), the
+  9. v2.3 part 1: the stalled-body watchdog (C# SentinelBody reader, 2s limit,
+     abort, stall counter, per-address block)
+  10. v2.2 hardening: the request-body DoS guard (411/413 before any read), the
      idle-vs-catching-up verdict, sessions ending with their account, the
      public-health/authenticated-status split, the 5s watermark overlap, paged
      oldest-first polls, and New-Object PBKDF2 pinned to RFC 6070 vectors
@@ -155,6 +157,9 @@ try {
     $Script:UsersUpdated = @{}
     $Script:UsersRevoked = 0
     $Script:BodyRejections = 0
+    $Script:BodyTimeouts = 0
+    $Script:BodyTimedOut = $false
+    $Script:BodyStalls = @{}
     $Script:LastPollCapped = $false
     $Script:LastCheck = (Get-Date).AddMinutes(-2)
     $script:Raised = @()
@@ -838,7 +843,8 @@ try {
   Assert-True ($web.Contains('$Script:BodyRejections++')) 'a refused body is counted'
   Assert-True ($web.Contains('TimeoutManager.EntityBody')) 'the listener bounds how long a client may take to send a body'
   Assert-True ($web.Contains('TimeoutManager.DrainEntityBody')) 'and how long we wait to drain one we did not read'
-  Assert-True ($web.Contains('Read-JsonBody $ctx $Script:MaxLoginBodyBytes')) 'the login route reads with the smaller budget'
+  Assert-True ($web.Contains('$bodyLimit = $Script:MaxLoginBodyBytes }')) 'the login route still reads with the smaller budget'
+  Assert-True ($web.Contains('$bodyParsed = Read-JsonBody $ctx $bodyLimit')) 'and the budget is the one handed to the bounded reader'
 
   # --- the public health probe leaks nothing; the counters moved behind auth --
   $hStart = $web.IndexOf("'^/api/health" + [char]36)
@@ -981,6 +987,111 @@ try {
   Assert-True (-not ($monText -match 'Rfc2898DeriveBytes\]::new')) 'AlphaSentinel.ps1 no longer uses [Type]::new() for the KDF'
   Assert-True (-not ($admText -match 'Rfc2898DeriveBytes\]::new')) 'New-SentinelAdmin.ps1 no longer uses [Type]::new() for the KDF'
   Assert-True ($monText.Contains('New-Object -TypeName System.Security.Cryptography.Rfc2898DeriveBytes')) 'it constructs the KDF with New-Object instead'
+
+  Write-Host ""
+  Write-Host "== v2.3 part 1: a stalled body cannot freeze the loop ==" -ForegroundColor Cyan
+
+  Assert-True ([bool]('SentinelBody' -as [type])) 'the C# body reader is compiled and available'
+  Assert-True ($Script:BodyReadMs -eq 2000) 'a client gets 2s to deliver the body it declared'
+
+  # --- the helper: reads exactly what was promised, or gives up -------------
+  $exact = [Text.Encoding]::UTF8.GetBytes('{"a":"bbbb"}')
+  $ms = New-Object System.IO.MemoryStream
+  $ms.Write($exact, 0, $exact.Length); $ms.Position = 0
+  $got = [SentinelBody]::Read($ms, $exact.Length, 2000)
+  Assert-True ($null -ne $got -and $got.Length -eq $exact.Length) 'Read returns exactly the promised bytes'
+  $msEarly = New-Object System.IO.MemoryStream
+  $msEarly.Write($exact, 0, 4); $msEarly.Position = 0
+  Assert-True ($null -eq [SentinelBody]::Read($msEarly, $exact.Length, 500)) 'Read returns null when the stream ends early'
+  $zero = [SentinelBody]::Read((New-Object System.IO.MemoryStream), 0, 500)
+  Assert-True ($null -ne $zero -and $zero.Length -eq 0) 'an empty body reads as an empty array, not null'
+
+  # a loopback socket pair is a real stall: the reader blocks until bytes arrive
+  function New-StallPair {
+    $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $l.Start()
+    $cli = New-Object System.Net.Sockets.TcpClient
+    $cli.Connect('127.0.0.1', [int]$l.LocalEndpoint.Port)
+    $srv = $l.AcceptTcpClient()
+    return [PSCustomObject]@{ Listener = $l; Client = $cli; Server = $srv; Stream = $srv.GetStream() }
+  }
+  function Close-StallPair($p) {
+    try { $p.Client.Close() } catch { }
+    try { $p.Server.Close() } catch { }
+    try { $p.Listener.Stop() } catch { }
+  }
+  # a request context with a declared length, a stream and an abortable response
+  function New-BodyContext2([int64]$Length, $Stream, $TransferEncoding = $null) {
+    $req = New-Object PSObject
+    $req | Add-Member -MemberType NoteProperty -Name ContentLength64 -Value $Length -Force
+    $req | Add-Member -MemberType NoteProperty -Name TransferEncoding -Value $TransferEncoding -Force
+    $req | Add-Member -MemberType NoteProperty -Name InputStream -Value $Stream -Force
+    $req | Add-Member -MemberType NoteProperty -Name ContentEncoding -Value ([Text.Encoding]::UTF8) -Force
+    $resp = New-Object PSObject
+    $resp | Add-Member -MemberType NoteProperty -Name Aborted -Value $false -Force
+    $resp | Add-Member -MemberType ScriptMethod -Name Abort -Value { $this.Aborted = $true } -Force
+    $ctx = New-Object PSObject
+    $ctx | Add-Member -MemberType NoteProperty -Name Request -Value $req -Force
+    $ctx | Add-Member -MemberType NoteProperty -Name Response -Value $resp -Force
+    return $ctx
+  }
+
+  $pair = New-StallPair
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $abandoned = [SentinelBody]::Read($pair.Stream, 100, $Script:BodyReadMs)
+  $sw.Stop()
+  Assert-True ($null -eq $abandoned) 'a client that declares 100 bytes and sends none is abandoned'
+  Assert-True ($sw.Elapsed.TotalSeconds -lt 3) ('and abandoned within ~3s (took ' + [Math]::Round($sw.Elapsed.TotalSeconds, 2) + 's)')
+  Close-StallPair $pair
+
+  # --- Read-JsonBody: abandons, flags, counts, aborts -----------------------
+  Reset-Engine
+  $pair2 = New-StallPair
+  $ctx2 = New-BodyContext2 50 $pair2.Stream
+  $sw2 = [Diagnostics.Stopwatch]::StartNew()
+  $body2 = Read-JsonBody $ctx2
+  $sw2.Stop()
+  Assert-True ($null -eq $body2) 'Read-JsonBody returns null for a stalled body instead of blocking'
+  Assert-True ($sw2.Elapsed.TotalSeconds -lt 3) 'and gives up inside ~3s rather than holding the loop'
+  Assert-True ($Script:BodyTimedOut) 'it flags BodyTimedOut for the route that called it'
+  Assert-True ($Script:BodyTimeouts -eq 1) 'and counts the timeout'
+  Assert-True ($Script:BodyRejections -eq 0) 'a stall is a timeout, not a size/411 rejection'
+  Assert-True ($ctx2.Response.Aborted) 'it aborts the connection so the socket is not left half-read'
+  Close-StallPair $pair2
+
+  # a body that actually arrives still parses
+  $pair3 = New-StallPair
+  $ctx3 = New-BodyContext2 12 $pair3.Stream
+  $pay = [Text.Encoding]::UTF8.GetBytes('{"a":"bbbb"}')
+  $pair3.Client.GetStream().Write($pay, 0, $pay.Length)
+  $pair3.Client.GetStream().Flush()
+  $parsed = Read-JsonBody $ctx3
+  Assert-True ($null -ne $parsed -and $parsed.a -eq 'bbbb') 'a body that really arrives is still parsed'
+  Assert-True (-not $Script:BodyTimedOut) 'and no timeout is flagged for it'
+  Close-StallPair $pair3
+
+  # --- three stalls from one address is an attack on the tool ---------------
+  Reset-Engine
+  $stallIp = '10.9.9.9'
+  Assert-True ((Register-BodyStall $stallIp) -eq 1) 'a stalled body is counted against its source address'
+  Assert-True (Test-LoginAllowed $stallIp) 'one stall does not block the address'
+  Assert-True ((Register-BodyStall $stallIp) -eq 2) 'the second stall is counted'
+  Assert-True (Test-LoginAllowed $stallIp) 'nor does the second'
+  Assert-True ((Register-BodyStall $stallIp) -eq 3) 'the third stall is counted'
+  Assert-True (-not (Test-LoginAllowed $stallIp)) 'the third stall from one address blocks it (the login route answers 429)'
+  Assert-True ((Get-LoginRetryAfter $stallIp) -gt 0) 'and the Retry-After it reports is real'
+  Assert-True (Test-LoginAllowed '10.9.9.10') 'an unrelated address is unaffected'
+  Assert-True ($Script:LoginFailures[$stallIp].Count -ge $Script:MaxLoginFailures) 'the stall counts toward the login-failure budget too'
+
+  # --- the handler is wired up (and reads the body once) --------------------
+  $web2 = Get-Section $raw $mWeb $mProbes
+  Assert-True ($web2.Contains('$Script:BodyTimedOut = $false')) 'every request starts with a clear stalled flag'
+  Assert-True ($web2.Contains('Register-BodyStall $stallIp')) 'a stall registers against the source address in the handler'
+  Assert-True ($web2.Contains('request body stalled - connection aborted')) 'and lands in the auth audit trail'
+  Assert-True ($web2.Contains('bodyTimeouts        = $Script:BodyTimeouts')) 'the stall counter is exposed on /api/status'
+  Assert-True ($web2.Contains('$bodyParsed = Read-JsonBody $ctx $bodyLimit')) 'the handler reads the body once, with the watchdog'
+  Assert-True (-not $web2.Contains('# drain the body')) 'the routes no longer read (and re-drain) it themselves'
+  Assert-True ((Get-Content -Raw $Script).Contains('[SentinelBody]::Read($ctx.Request.InputStream')) 'Read-JsonBody reads through the bounded C# reader'
 
   Write-Host ""
   Write-Host "== fixture replay ==" -ForegroundColor Cyan
