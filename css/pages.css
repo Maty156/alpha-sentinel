@@ -1,0 +1,30 @@
+/* pages.css - OWNER: rules that only one page needs. */
+/* overview */
+.overview-latest { grid-column: 1 / -1; }
+.tactic-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.tactic-list li { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-table); }
+.tactic-list .t-name { flex: 1 1 auto; color: var(--text-dim); }
+.tactic-list .t-count { font-variant-numeric: tabular-nums; color: var(--text); }
+.tactic-bar { height: 6px; border-radius: var(--radius-pill); background: var(--brand); min-width: 3px; }
+.coverage-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2); }
+.coverage-value { font-size: 26px; font-weight: 600; color: var(--ok); }
+.coverage-value.warn { color: var(--warn); }
+.coverage-value.bad { color: var(--bad); }
+
+/* alerts */
+.filterbar { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.chip-group { display: flex; gap: 6px; flex-wrap: wrap; }
+.alert-desc { color: var(--text-dim); font-weight: 400; }
+.alert-title { color: var(--text); font-weight: 500; }
+
+/* rules */
+.rule-blind { color: var(--bad); }
+.rule-ok { color: var(--ok); }
+.rule-fix { font-family: var(--font-mono); font-size: var(--fs-cap); color: var(--text-dim); background: var(--bg-2); border-radius: var(--radius-sm); padding: 6px 8px; display: block; margin-top: 4px; }
+
+/* events */
+.ev-summary { color: var(--text); }
+.ev-rule { color: var(--severity, var(--text-dim)); }
+
+/* settings */
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: var(--s-3); align-items: start; }

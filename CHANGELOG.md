@@ -1,5 +1,107 @@
 ﻿# Changelog
 
+## v2.3
+
+Three parts: a security fix for a freeze one client could trigger, the backend the
+new dashboard reads, and a rebuilt front end. Every part was verified against the
+PowerShell parser and a **536-assertion** suite (`tests/run-tests.ps1`, exit code 1
+on any failure - no elevation, no event log, no HTTP needed), plus live runs
+against a real listener: the stall/abort/429 behaviour, every endpoint with and
+without a session, and the static allowlist.
+
+### 1. A stalled request body can no longer freeze the loop (do first)
+
+- `TimeoutManager` is only enforced by HTTP.sys, and the managed listener does not
+  enforce it: a client that declared a `Content-Length` and then sent nothing parked
+  `ReadToEnd()` until the connection died. This server has ONE thread, so the
+  dashboard and the event poll stopped with it - reproduced as a 25 s hold and five
+  failed health probes.
+- **`SentinelBody`** (C#, compiled once with `Add-Type` behind a type check) reads
+  exactly the declared byte count on a dedicated `LongRunning` thread and gives up
+  after `$Script:BodyReadMs` (2000). `ReadAsync` + `Wait` measured ~5 s per stall;
+  this measures ~2.0 s, and a health probe during a stall now answers in ~1.8 s
+  instead of timing out.
+- `Read-JsonBody` reads through it, decodes with `ContentEncoding.GetString()`, and
+  on a stall flags `BodyTimedOut`, counts `bodyTimeouts`, **aborts the connection**
+  (so the socket is never left half-read) and returns null.
+- The body is now read **once**, in `Invoke-Handler`, so the 411/413 decision and
+  the watchdog live in one place; the routes consume the parsed body instead of
+  reading and re-draining it themselves.
+- The client address is captured at the top of the request. Aborting the connection
+  makes `RemoteEndPoint` unavailable, which filed the attack under "unknown" and
+  left the real source unlogged and unblocked.
+- A stalled body is a failed sign-in (auth audit + the login-failure budget), and
+  **three stalls from one address block it** for the login-block window: the next
+  sign-in gets 429 with a `Retry-After` of 300 s. `bodyTimeouts` is on `/api/status`.
+
+### 2. The backend for the new dashboard
+
+Rolling, **in-memory, per-process** state - a dashboard window, not a second copy of
+the history (`sentinel-history.csv` owns durability):
+
+- **Events ring buffer**: the last 300 normalised events (time, eventId, channel,
+  host, user, sourceIp, a generated summary, matchedRule). It stores only what the
+  engine already parsed plus generated text - never a raw message body, a command
+  line or a secret, and a test asserts the field set exactly.
+- **Hosts seen**: host -> firstSeen/lastSeen/eventCount/alertCount/users[]/ips[],
+  capped at 200 hosts (least recently seen evicted), 40 users and 20 addresses each.
+- **Hourly buckets**: the last 24 hours of events, alerts by severity and alerts by
+  MITRE tactic, plus the tile values at the start of each hour so the dashboard can
+  show a delta against the previous hour.
+
+Endpoints (session required, GET-only, JSON):
+
+- `GET /api/overview` - tiles and deltas, coverage (percent / rulesWorking /
+  rulesBlind / blindRules, from the existing audit preflight), severityCounts,
+  tacticCounts, `hourly[]`, lastPoll, `health` (ok | degraded | blind) and version.
+- `GET /api/events` - newest first; `limit` clamped to 300, `eventId` validated
+  (400 on junk), `host`/`user` exact, `q` a plain substring and never a regex.
+- `GET /api/hosts` - the host map, busiest first.
+- `GET /api/settings` - read-only and deliberately narrow: version, poll/bind/port,
+  session and rate limits, forwarding on/off + destination **host** only, the audit
+  preflight, and account **names with creation dates**. No hash, salt, session id or
+  forwarding key has any path into it.
+
+Alerts now carry what a drawer and a kill-chain timeline need: `Status` (the
+four-value vocabulary), a separate `Acknowledged` boolean, `MitreId` / `MitreName` /
+`Tactic` (parsed from the rule's existing Mitre and Category - no rule logic
+changed), `Entity`, `FirstSeen` / `LastSeen` / `Count`, and the contributing event
+summaries. A hit suppressed by dedupe joins the open alert's list instead of
+vanishing.
+
+### 3. The new dashboard front end
+
+- **Split into files** (`css/tokens|base|layout|components|pages|login.css`,
+  `js/api|state|ui|router|app.js`, `js/pages/*.js`, `dashboard.html`, `login.html` +
+  `login.js`). `dashboard.js` is gone. No inline style or script element and no
+  `on*` attribute anywhere - the CSP keeps `script-src 'self'`.
+- **A strict static allowlist**: every servable file is named with its content type,
+  and a request is looked up in that table rather than turned into a filesystem
+  path, so there is nothing to traverse - `../` and unknown paths are a plain 404.
+- **Design**: dark charcoal, crimson reserved for the brand (logo, active nav,
+  primary button). Severity has its own palette and never uses crimson - Critical
+  `#ff4d6d`, High orange, Medium amber, Low blue-grey; healthy/coverage is teal.
+  Base type 15px, tables 14px, tile numbers 30px, captions never below 12px, visible
+  keyboard focus, `prefers-reduced-motion` respected.
+- **Pages**: Overview (five tiles with deltas and sparklines, coverage meter with a
+  blind-rules banner linking to Rules, severity bar, hourly chart as inline SVG,
+  top tactics, latest alerts and events), Alerts (severity/status/ack chips, search,
+  table, right-side drawer with status, a separate ack toggle, contributing events
+  and a kill-chain timeline), Detection Rules (all 28 families, Working or BLIND
+  with the reason and the `auditpol` fix), Events (live table with the endpoint's
+  filters), Settings (read-only), each with empty and error states.
+- **Mockup vs spec**: Assets / Attack Paths / Reports render as disabled "Soon"
+  items with no route; the top search filters only the current page's table; the
+  range is fixed at 24 h; the sidebar badge is `openAlerts`; Acknowledged is a flag
+  and never a status; Critical never uses the brand crimson; charts show an honest
+  empty state; and the **"DEMO DATA" marker appears only with the new `-DemoData`
+  switch** - the tool never invents numbers to fill a panel.
+
+### Docs
+
+README: the new endpoints, the file layout and design rules, the `-DemoData` flag,
+the stalled-body watchdog, and the assertion count (536).
+
 ## v2.2
 
 Replaces the injected-token dashboard with a real login, and makes the polling

@@ -130,7 +130,11 @@ param(
   [string]$StateFile = "",
   [string]$UsersFile = "",
   [string]$AuthFile = "",
-  [string]$ReplayPath = ""
+  [string]$ReplayPath = "",
+  # The dashboard shows a "DEMO DATA" marker ONLY when the operator says this is
+  # a lab demo. Production never invents numbers; an empty dashboard says it is
+  # empty (see the v2.3 front end).
+  [switch]$DemoData
 )
 
 if (-not $HistoryFile -and $PSScriptRoot) {
@@ -1139,6 +1143,7 @@ function Get-OverviewPayload {
     lastPoll = [PSCustomObject]@{ lagSeconds = [int]$Script:LagSeconds; catchingUp = $catch.catchingUp; capped = $catch.capped }
     health  = $health
     version = $Script:SentinelVersion
+    demoData = [bool]$Script:DemoData
   }
 }
 
@@ -1259,6 +1264,7 @@ function Get-SettingsPayload {
     }
     users        = $users
     usersFileState = (Get-UsersFileState).reason
+    demoData     = [bool]$Script:DemoData
   }
 }
 
@@ -1332,6 +1338,9 @@ $Script:BodyStalls = @{}        # ip -> stalls seen (in-memory, per process)
 
 # ---- ALPHA SENTINEL version ------------------------------------------------
 $Script:SentinelVersion = '2.3'
+# true only when the operator started the monitor with -DemoData: the dashboard
+# then labels itself as a demo instead of pretending the numbers are real
+$Script:DemoData = [bool]$DemoData
 
 # ---- dashboard observability state -----------------------------------------
 # EVERYTHING BELOW IS IN MEMORY AND RESETS WITH THE PROCESS. That is deliberate:
@@ -2775,6 +2784,32 @@ function Send-File($res, $path, $contentType) {
   Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes($body)) $contentType
 }
 
+# ---- static files: an EXACT allowlist -------------------------------------
+# Every servable file is named here with its type. The request never becomes a
+# filesystem path, so there is nothing to traverse: a path that is not a key of
+# this table is a 404, and ../ can only ever produce one of those.
+$Script:StaticFiles = @{
+  '/dashboard.html' = @{ file = 'dashboard.html'; type = 'text/html; charset=utf-8' }
+  '/login.html'     = @{ file = 'login.html';     type = 'text/html; charset=utf-8' }
+  '/login.js'       = @{ file = 'login.js';       type = 'application/javascript; charset=utf-8' }
+  '/css/tokens.css'     = @{ file = 'css/tokens.css';     type = 'text/css; charset=utf-8' }
+  '/css/base.css'       = @{ file = 'css/base.css';       type = 'text/css; charset=utf-8' }
+  '/css/layout.css'     = @{ file = 'css/layout.css';     type = 'text/css; charset=utf-8' }
+  '/css/components.css' = @{ file = 'css/components.css'; type = 'text/css; charset=utf-8' }
+  '/css/pages.css'      = @{ file = 'css/pages.css';      type = 'text/css; charset=utf-8' }
+  '/css/login.css'      = @{ file = 'css/login.css';      type = 'text/css; charset=utf-8' }
+  '/js/api.js'      = @{ file = 'js/api.js';      type = 'application/javascript; charset=utf-8' }
+  '/js/state.js'    = @{ file = 'js/state.js';    type = 'application/javascript; charset=utf-8' }
+  '/js/ui.js'       = @{ file = 'js/ui.js';       type = 'application/javascript; charset=utf-8' }
+  '/js/router.js'   = @{ file = 'js/router.js';   type = 'application/javascript; charset=utf-8' }
+  '/js/app.js'      = @{ file = 'js/app.js';      type = 'application/javascript; charset=utf-8' }
+  '/js/pages/overview.js' = @{ file = 'js/pages/overview.js'; type = 'application/javascript; charset=utf-8' }
+  '/js/pages/alerts.js'   = @{ file = 'js/pages/alerts.js';   type = 'application/javascript; charset=utf-8' }
+  '/js/pages/rules.js'    = @{ file = 'js/pages/rules.js';    type = 'application/javascript; charset=utf-8' }
+  '/js/pages/events.js'   = @{ file = 'js/pages/events.js';   type = 'application/javascript; charset=utf-8' }
+  '/js/pages/settings.js' = @{ file = 'js/pages/settings.js'; type = 'application/javascript; charset=utf-8' }
+}
+
 # PowerShell 5.1 has no ConvertTo-Json -AsArray, so always build the array
 # explicitly - a single-element list must still serialise as [ ... ], not { ... }.
 function ConvertTo-JsonArray($items) {
@@ -2934,6 +2969,20 @@ function Invoke-Handler($ctx) {
       }
     }
 
+    # ---- static assets, served from the allowlist above. Anything else that is
+    # ---- not an /api/ route is a 404: no directory listing, no traversal, no
+    # ---- path guessed from the request.
+    if (-not $isApi -and $path -ne '/') {
+      $asset = $null
+      if ($Script:StaticFiles.ContainsKey($path)) { $asset = $Script:StaticFiles[$path] }
+      if ($asset) {
+        Send-File $res (Join-Path $Script:DashboardDir $asset.file) $asset.type
+      } else {
+        Send-Json $res '{"error":"Not found."}' 404
+      }
+      return
+    }
+
     switch -Regex ($path) {
       '^/$' {
         if (Test-Authenticated $ctx) {
@@ -2941,15 +2990,6 @@ function Invoke-Handler($ctx) {
         } else {
           Send-File $res (Join-Path $Script:DashboardDir 'login.html') 'text/html; charset=utf-8'
         }
-      }
-      '^/login\.html$' {
-        Send-File $res (Join-Path $Script:DashboardDir 'login.html') 'text/html; charset=utf-8'
-      }
-      '^/login\.js$' {
-        Send-File $res (Join-Path $Script:DashboardDir 'login.js') 'application/javascript; charset=utf-8'
-      }
-      '^/dashboard\.js$' {
-        Send-File $res (Join-Path $Script:DashboardDir 'dashboard.js') 'application/javascript; charset=utf-8'
       }
       '^/api/login$' {
         if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - sign in with POST."}' 405; return }

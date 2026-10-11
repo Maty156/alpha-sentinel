@@ -23,7 +23,10 @@ Covered:
   10. v2.3 part 2: the dashboard backend - events ring buffer, hosts seen, hourly
      buckets, deltas, coverage/health, the four GET endpoints and the alert
      object's status/ack/mitre/first-last-seen/contributing-events shape
-  11. v2.2 hardening: the request-body DoS guard (411/413 before any read), the
+  11. v2.3 part 3: the new front end - file layout, the static allowlist, no
+     inline script/style/handler, no innerHTML, the design tokens, and the
+     mockup-vs-spec rules (Soon items, fixed range, demo gating)
+  12. v2.2 hardening: the request-body DoS guard (411/413 before any read), the
      idle-vs-catching-up verdict, sessions ending with their account, the
      public-health/authenticated-status split, the 5s watermark overlap, paged
      oldest-first polls, and New-Object PBKDF2 pinned to RFC 6070 vectors
@@ -890,11 +893,17 @@ try {
   Assert-True (-not $Script:LastPollCapped) 'a poll that deferred nothing clears the capped flag'
   Assert-True (-not (Get-CatchUpState 20).catchingUp) 'so the tool reads as idle despite a poll interval of lag'
 
-  $js = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'dashboard.js')
-  Assert-True ($js.Contains('function isCatchingUp')) 'dashboard.js has the shared catch-up rule'
-  Assert-True ($js.Contains("api('/status')")) 'the dashboard reads the authenticated /api/status, not the bare probe'
-  Assert-True (-not $js.Contains('lag > 2')) 'the old lag > 2 pill test is gone from the dashboard'
-  Assert-True ($js.Contains('(poll * 2) + 5')) 'and the JS threshold is the same formula as the server'
+  # (v2.3) the catch-up verdict is computed server-side only and the dashboard
+  # renders it, so the rule has exactly one implementation. These assertions moved
+  # with it: there is no dashboard.js to inspect any more.
+  $appJsNow = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'js/app.js')
+  Assert-True ($appJsNow.Contains('ov.health')) 'the dashboard takes the health verdict from the server'
+  Assert-True ($appJsNow.Contains('degraded')) 'and knows the catching-up state it can be told'
+  Assert-True (-not $appJsNow.Contains('lag > 2')) 'the old lag > 2 pill test is gone from the dashboard'
+  $allJs = @(Get-ChildItem -Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'js') -Recurse -File |
+    ForEach-Object { Get-Content -Raw $_.FullName })
+  Assert-True (-not (@($allJs | Where-Object { $_ -match '\(poll \* 2\) \+ 5' }).Count -gt 0)) 'and the threshold formula is not duplicated in the client'
+  Assert-True (-not (Test-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'dashboard.js'))) 'dashboard.js no longer exists (the front end is split into js/ modules)'
   $PollSeconds = $savedPollSeconds
 
   # --- a session dies with its account --------------------------------------
@@ -1317,6 +1326,136 @@ try {
   Assert-True ($web3.Contains('this endpoint is read-only (GET)')) 'the new endpoints are GET-only'
   Assert-True ($web3.Contains('$ev = Get-EventsPayload $ctx.Request.QueryString')) 'and /api/events is driven by the query string'
   Assert-True (-not $web3.Contains("'/api/overview'")) 'the new routes are exact matches, not prefixes'
+
+  Write-Host ""
+  Write-Host "== v2.3 part 3: the new dashboard front end ==" -ForegroundColor Cyan
+
+  $root = Split-Path -Parent $PSScriptRoot
+  function Get-RepoText([string]$rel) { return (Get-Content -Raw (Join-Path $root $rel)) }
+  function RepoHas([string]$rel) { return (Test-Path (Join-Path $root $rel)) }
+
+  # --- the file layout ------------------------------------------------------
+  $layout = @(
+    'dashboard.html', 'login.html', 'login.js',
+    'css/tokens.css', 'css/base.css', 'css/layout.css', 'css/components.css', 'css/pages.css', 'css/login.css',
+    'js/api.js', 'js/state.js', 'js/ui.js', 'js/router.js', 'js/app.js',
+    'js/pages/overview.js', 'js/pages/alerts.js', 'js/pages/rules.js', 'js/pages/events.js', 'js/pages/settings.js'
+  )
+  $missing = @($layout | Where-Object { -not (RepoHas $_) })
+  Assert-True ($missing.Count -eq 0) ('every file in the layout exists (' + (($missing -join ', ') -replace '^$', 'none missing') + ')')
+  Assert-True (-not (RepoHas 'dashboard.js')) 'the old dashboard.js is gone'
+
+  # --- the static allowlist only serves what exists, and everything exists ---
+  $web4 = Get-Section $raw $mWeb $mProbes
+  Assert-True ($web4.Contains('$Script:StaticFiles = @{')) 'the static files are an explicit allowlist'
+  Assert-True ($web4.Contains('$Script:StaticFiles.ContainsKey($path)')) 'a request is looked up in it, never turned into a path'
+  Assert-True ($web4.Contains('{"error":"Not found."}'' 404')) 'anything not on the list is a 404'
+  $allow = @()
+  $block = [regex]::Match($web4, "(?s)\`$Script:StaticFiles = @\{(.*?)\n\}")
+  foreach ($m in [regex]::Matches($block.Groups[1].Value, "'(/[^']+)'\s*=\s*@\{\s*file\s*=\s*'([^']+)';\s*type\s*=\s*'([^']+)'")) {
+    $allow += [PSCustomObject]@{ path = $m.Groups[1].Value; file = $m.Groups[2].Value; type = $m.Groups[3].Value }
+  }
+  Assert-True ($allow.Count -ge $layout.Count) ('the allowlist covers the layout (' + $allow.Count + ' entries)')
+  $allowMissing = @($allow | Where-Object { -not (RepoHas $_.file) })
+  Assert-True ($allowMissing.Count -eq 0) ('every allowlisted file is on disk (' + (($allowMissing | ForEach-Object { $_.file }) -join ', ') + ')')
+  $badType = @($allow | Where-Object {
+      ($_.file -like '*.html' -and $_.type -notlike 'text/html*') -or
+      ($_.file -like '*.js'   -and $_.type -notlike 'application/javascript*') -or
+      ($_.file -like '*.css'  -and $_.type -notlike 'text/css*')
+    })
+  Assert-True ($badType.Count -eq 0) 'every entry declares the right content type for its extension'
+  # every css/js file on disk is reachable through the allowlist (nothing orphaned)
+  $onDisk = @()
+  foreach ($d in @('css', 'js')) {
+    $onDisk += @(Get-ChildItem -Path (Join-Path $root $d) -Recurse -File | ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\', '/') })
+  }
+  $unlisted = @($onDisk | Where-Object { $allow.file -notcontains $_ })
+  Assert-True ($unlisted.Count -eq 0) ('no stylesheet or script is left unserved (' + ($unlisted -join ', ') + ')')
+  Assert-True ($allow.path -notcontains '/dashboard.js') 'dashboard.js is not in the allowlist'
+
+  # --- no inline code anywhere ---------------------------------------------
+  foreach ($html in @('dashboard.html', 'login.html')) {
+    $txt = Get-RepoText $html
+    Assert-True ([regex]::Matches($txt, '<style[ >]').Count -eq 0) ("   " + $html + ' has no inline style element')
+    $inlineScripts = @([regex]::Matches($txt, '<script[^>]*>') | Where-Object { $_.Value -notmatch 'src=' })
+    Assert-True ($inlineScripts.Count -eq 0) ("   " + $html + ' has no script element without src')
+    Assert-True ([regex]::Matches($txt, '\son[a-z]+\s*=').Count -eq 0) ("   " + $html + ' has no on* handler attribute')
+    if ($html -eq 'dashboard.html') {
+      Assert-True ($txt.Contains('id="view"')) '   dashboard.html is a shell with a view container'
+    } else {
+      Assert-True ($txt.Contains('id="loginForm"')) '   login.html is a shell with the sign-in form'
+    }
+  }
+  $jsFiles = @('js/api.js', 'js/state.js', 'js/ui.js', 'js/router.js', 'js/app.js',
+               'js/pages/overview.js', 'js/pages/alerts.js', 'js/pages/rules.js', 'js/pages/events.js', 'js/pages/settings.js')
+  foreach ($f in $jsFiles) {
+    $txt = Get-RepoText $f
+    Assert-True ([regex]::Matches($txt, '\.innerHTML\s*=').Count -eq 0) ("   " + $f + ' never assigns innerHTML (all text goes through textContent)')
+    Assert-True ([regex]::Matches($txt, 'document\.write').Count -eq 0) ("   " + $f + ' never uses document.write')
+    Assert-True ($txt -match 'OWNER:') ("   " + $f + ' says what it owns in a header comment')
+  }
+  Assert-True ((Get-RepoText 'js/ui.js').Contains('createTextNode')) 'the DOM helper builds text nodes, not markup'
+  Assert-True ((Get-RepoText 'js/ui.js').Contains('on') -and (Get-RepoText 'js/ui.js').Contains('return;')) 'the element helper refuses on* attributes'
+
+  # --- CSP unchanged --------------------------------------------------------
+  Assert-True ($web4.Contains("script-src ''self''")) 'the CSP still allows only same-origin scripts'
+  Assert-True (-not ($web4 -match "script-src [^;]*unsafe-inline")) 'and never unsafe-inline for scripts'
+
+  # --- design tokens: brand vs severity, type scale -------------------------
+  $tokens = Get-RepoText 'css/tokens.css'
+  Assert-True ($tokens.Contains('--brand:')) 'there is a brand colour'
+  Assert-True ($tokens.Contains('--sev-critical:')) 'and separate severity colours'
+  Assert-True (-not ($tokens -match '--brand:\s*#ff4d6d')) 'the brand colour is not a severity colour'
+  $components = Get-RepoText 'css/components.css'
+  Assert-True ($components -match '\.sev-Critical[^\}]*var\(--sev-critical\)') 'Critical uses the severity colour, never the brand'
+  Assert-True (-not ($components -match '\.sev-(Critical|High|Medium|Low)[^\}]*var\(--brand\)')) 'no severity class uses the brand colour'
+  Assert-True ($tokens -match '--fs-base:\s*1[56]px') 'the base font is 15-16px'
+  Assert-True ($tokens -match '--fs-table:\s*14px') 'table text is 14px'
+  Assert-True ($tokens -match '--fs-tile:\s*(2[89]|3[012])px') 'tile numbers are 28-32px'
+  Assert-True ($tokens -match '--fs-cap:\s*12px') 'the smallest caption is 12px'
+  Assert-True ((Get-RepoText 'css/base.css').Contains('prefers-reduced-motion')) 'reduced motion is respected'
+  Assert-True ((Get-RepoText 'css/base.css').Contains(':focus-visible')) 'keyboard focus is visible'
+
+  # --- mockup vs spec -------------------------------------------------------
+  $dash = Get-RepoText 'dashboard.html'
+  Assert-True ([regex]::Matches($dash, 'nav-item disabled').Count -eq 3) 'the three not-built-yet items render as disabled nav items'
+  Assert-True ([regex]::Matches($dash, 'nav-soon').Count -eq 3) 'and are marked Soon'
+  foreach ($soon in @('Assets', 'Attack Paths', 'Reports')) {
+    Assert-True ($dash.Contains($soon)) ('   ' + $soon + ' is shown (disabled)')
+  }
+  Assert-True (-not ($dash -match 'href="#/(assets|paths|reports)"')) 'and none of them has a route'
+  Assert-True ($dash.Contains('id="search"')) 'the top search box is rendered'
+  Assert-True ($dash.Contains('id="range"')) 'the range selector is rendered'
+  Assert-True ([regex]::Matches($dash, '<option').Count -eq 1) 'and is fixed at one option (24 h) - no new endpoint behind it'
+  Assert-True ($dash.Contains('id="alertCount"')) 'the sidebar shows the open-alert badge'
+  Assert-True ($dash.Contains('id="demoPill"') -and $dash.Contains('hidden')) 'the demo marker starts hidden'
+  $appjs = Get-RepoText 'js/app.js'
+  Assert-True ($appjs.Contains('demoData')) 'the demo marker is driven by the backend flag'
+  Assert-True ($appjs.Contains('DEMO DATA')) 'and says so when it is on'
+  Assert-True (-not (Get-RepoText 'js/pages/overview.js').Contains('2,492')) 'no invented demo numbers in the front end'
+  Assert-True (-not $dash.Contains('2,492')) 'and none in the shell'
+  Assert-True ($Script:DemoData -eq $false) 'demo mode is off unless the operator asks for it'
+
+  # --- the alert vocabulary and the router ---------------------------------
+  $alertsJs = Get-RepoText 'js/pages/alerts.js'
+  foreach ($st in @('New', 'Investigating', 'Resolved', 'False Positive')) {
+    Assert-True ($alertsJs.Contains($st)) ('   the status vocabulary includes ' + $st)
+  }
+  Assert-True ($alertsJs.Contains('Acknowledged')) 'Acknowledged is offered as its own flag'
+  Assert-True ($alertsJs.Contains('/status') -and $alertsJs.Contains('ack')) 'the drawer can change status and ack'
+  Assert-True ($alertsJs.Contains('kill-chain timeline')) 'and shows the kill-chain timeline'
+  Assert-True ($alertsJs.Contains('Contributing events')) 'plus the contributing events'
+  $routerJs = Get-RepoText 'js/router.js'
+  foreach ($r in @('/overview', '/alerts', '/rules', '/events', '/settings')) {
+    Assert-True ($routerJs.Contains($r)) ('   the router knows ' + $r)
+  }
+  foreach ($pg in @('overview', 'alerts', 'rules', 'events', 'settings')) {
+    Assert-True ((Get-RepoText ('js/pages/' + $pg + '.js')).Contains('S.pages.' + $pg + ' =')) ('   the ' + $pg + ' page registers itself')
+  }
+  Assert-True ((Get-RepoText 'js/state.js').Contains('visibilitychange')) 'polling pauses when the tab is hidden'
+  Assert-True ((Get-RepoText 'js/api.js').Contains("credentials: 'same-origin'")) 'API calls carry the session cookie'
+  Assert-True ((Get-RepoText 'js/api.js').Contains('401')) 'and a 401 sends the browser to the sign-in page'
+  Assert-True ((Get-RepoText 'js/pages/settings.js').Contains('Read-only') -or (Get-RepoText 'js/pages/settings.js').Contains('read-only')) 'Settings presents itself as read-only'
 
   Write-Host ""
   Write-Host "== fixture replay ==" -ForegroundColor Cyan

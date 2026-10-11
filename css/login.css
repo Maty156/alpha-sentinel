@@ -1,0 +1,19 @@
+/* login.css - OWNER: the sign-in page only. Uses the same tokens as the app. */
+.login-wrap { min-height: 100vh; display: grid; place-items: center; padding: var(--s-5); }
+.login-card {
+  width: 100%; max-width: 380px; background: var(--bg-1); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: var(--s-6) var(--s-5); box-shadow: var(--shadow);
+}
+.login-card .brand { justify-content: center; padding-bottom: var(--s-2); }
+.login-sub { color: var(--text-mute); font-size: var(--fs-cap); text-align: center; margin-bottom: var(--s-5); }
+.login-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--s-3); }
+.login-field label { font-size: var(--fs-cap); color: var(--text-dim); }
+.login-field input { width: 100%; }
+.login-actions { margin-top: var(--s-4); }
+.login-actions .btn-primary { width: 100%; justify-content: center; padding: 9px; }
+.login-error {
+  display: none; margin-bottom: var(--s-3); padding: 9px var(--s-3); border-radius: var(--radius-sm);
+  background: var(--bad-soft); color: var(--bad); font-size: var(--fs-table);
+}
+.login-error.on { display: block; }
+.login-foot { margin-top: var(--s-4); text-align: center; color: var(--text-mute); font-size: var(--fs-cap); }

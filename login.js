@@ -1,67 +1,51 @@
-// ============================================================
-// ALPHA SENTINEL - sign-in page
-// Served by AlphaSentinel.ps1. Kept in its own file because the server sends
-// Content-Security-Policy: script-src 'self' (no inline script anywhere).
-// ============================================================
-'use strict';
-
+/* login.js - OWNER: the sign-in form. Posts to /api/login, shows the one generic
+   message the backend returns, and forwards to the dashboard on success. */
 (function () {
+  'use strict';
+
   var form = document.getElementById('loginForm');
-  var btn = document.getElementById('loginBtn');
-  var errBox = document.getElementById('loginError');
-  var userEl = document.getElementById('username');
-  var passEl = document.getElementById('password');
+  var button = document.getElementById('loginButton');
+  var errorBox = document.getElementById('loginError');
 
-  function showError(message) {
-    errBox.textContent = message;
-    errBox.style.display = 'block';
+  function show(message) {
+    errorBox.textContent = message;
+    errorBox.classList.add('on');
   }
 
-  function clearError() {
-    errBox.textContent = '';
-    errBox.style.display = 'none';
+  function busy(on) {
+    button.disabled = !!on;
+    button.textContent = on ? 'Signing in...' : 'Sign in';
   }
 
-  form.addEventListener('submit', function (event) {
-    event.preventDefault();
-    clearError();
+  function logFail(err) {
+    console.error('[sentinel:login] sign-in failed:', err && err.message ? err.message : err);
+  }
 
-    var username = (userEl.value || '').trim();
-    var password = passEl.value || '';
-    if (!username || !password) {
-      showError('Enter your username and password.');
-      return;
-    }
-
-    btn.disabled = true;
-    var original = btn.textContent;
-    btn.textContent = 'Signing in...';
-
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var username = document.getElementById('username').value;
+    var password = document.getElementById('password').value;
+    if (!username || !password) { show('Enter your username and password.'); return; }
+    busy(true);
     fetch('/api/login', {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify({ username: username, password: password })
     }).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (data) {
-        if (res.ok) {
-          // the session cookie is HttpOnly, so the browser - not this script -
-          // is what carries it to the dashboard
-          window.location.replace('/');
-          return;
-        }
-        if (res.status === 429) {
-          showError(data.error || 'Too many failed sign-in attempts from this address.');
-        } else {
-          showError(data.error || 'Incorrect username or password.');
-        }
+      return res.text().then(function (text) {
+        var data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+        if (res.ok) { window.location.replace('/'); return; }
+        var message = (data && data.error) ? data.error : 'Sign-in failed.';
+        if (res.status === 429) { message = 'Too many attempts from this address. Try again in a few minutes.'; }
+        show(message);
+        busy(false);
       });
-    }).catch(function () {
-      showError('Could not reach the server. Is AlphaSentinel running?');
-    }).then(function () {
-      btn.disabled = false;
-      btn.textContent = original;
-      passEl.value = '';
+    }).catch(function (err) {
+      logFail(err);
+      show('Could not reach the monitor. Is it still running?');
+      busy(false);
     });
   });
 })();

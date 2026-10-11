@@ -119,6 +119,7 @@ Optional flags:
 | `-StateFile` | `sentinel-state.json` | per-channel poll watermarks |
 | `-UsersFile` | `sentinel-users.json` | dashboard accounts |
 | `-AuthFile` | `sentinel-auth.csv` | login audit trail |
+| `-DemoData` | off | label the dashboard as a lab demo; the tool never invents numbers, so this only adds the marker |
 | `-ReplayPath` | - | replay exported event XML through the rule engine and exit |
 
 Works on Windows Server 2012 R2+ and Windows 10/11, on Windows PowerShell 5.1
@@ -145,6 +146,14 @@ with the page. That is replaced by a real login:
 - **`POST /api/logout`** destroys the session server-side and clears the cookie.
   The dashboard header shows *signed in as &lt;user&gt;* and a Logout button, and any
   401 sends the browser back to the sign-in page.
+- **The read-only dashboard API** - `GET /api/overview` (tiles, deltas, coverage,
+  severity/tactic counts, hourly series, lastPoll, health, version),
+  `GET /api/events` (the last 300 events, newest first, filtered), `GET /api/hosts`
+  and `GET /api/settings` (read-only, and it never carries a hash, salt, session id
+  or forwarding key). They are session-required and GET-only; the older
+  `/api/alerts`, `/api/rules`, `/api/preflight`, `/api/status` and the CSV exports
+  are unchanged. All of this state is **in memory and resets with the process** - a
+  dashboard window, not the alert history.
 - **Every `/api/*` route except `/api/health` and `POST /api/login` answers 401
   JSON** without a live session. `/api/health` stays open for monitoring probes and
   now answers a bare `{"ok":true}` - nothing else at all - so an unauthenticated
@@ -176,7 +185,11 @@ with the page. That is replaced by a real login:
 - **Bounded request bodies and timeouts** - the web server refuses a body it
   cannot size (411) or one over the route's budget (413) *before* reading a byte,
   and caps how long a client may take to send a body, to drain one, or to finish its
-  headers. One slow client cannot hold the single web thread.
+  headers. Because `TimeoutManager` is only enforced by HTTP.sys, the read itself
+  runs on a dedicated thread with a 2 s limit (`SentinelBody`), so a client that
+  declares a length and then stalls is **abandoned and its connection aborted**
+  rather than parking the single web thread - a stalled body is a failed sign-in,
+  and three of them from one address block it (`bodyTimeouts` on `/api/status`).
 - Response hardening: `Content-Security-Policy` with **`script-src 'self'`** (no
   inline script anywhere; `dashboard.js` and `login.js` are separate files),
   `X-Frame-Options: DENY`, `nosniff`, `no-store`. No CDN, no outbound calls.
@@ -231,21 +244,50 @@ with the page. That is replaced by a real login:
 
 ## The web dashboard
 
-Wazuh-style dark UI matching the ALPHA platform's design language:
+A dark charcoal console with crimson used **only** for the brand (logo, active nav,
+primary button). Severity has its own palette and never borrows crimson: Critical
+is hot magenta-red `#ff4d6d`, High orange, Medium amber, Low blue-grey, and
+healthy/coverage is teal. Base text 15px, tables 14px, tile numbers 30px, captions
+never below 12px; keyboard focus is visible and `prefers-reduced-motion` is
+respected.
 
-- **Severity stat tiles** - Total / Critical / High / Medium / Low / Open / Acknowledged
-- **Live search** - by title, rule, MITRE, account, host, description
-- **Filters** - severity buttons, status dropdown, and a Self-test visibility toggle
-- **Auto-refresh** - every 10 s (toggleable) + manual refresh button
-- **Health pill** - poll lag, skipped events and failed log reads, or "up to date"
-  (idle is idle: one poll interval of lag does not read as "catching up")
-- **Alert table** - time, severity badge, alert, account, host, MITRE; click a row for the detail pane
-- **Detail pane** - MITRE ATT&CK mapping (linked), rule, event ID, host, account, source IP, what happened, remediation guidance
-- **Triage** - per-alert status (New / Investigating / Resolved / False Positive) + notes, saved server-side
-- **Detection coverage panel** - every rule family, how often it fired, its audit-policy state, and a **preflight banner** listing the families this host is not logging plus the exact `auditpol` commands that fix them
-- **Acknowledge / Unacknowledge** - per-row, persisted server-side
-- **Export CSV** - the engagement report (MITRE + ack state, formula-injection safe, self-test rows excluded)
-- **Signed in as &lt;user&gt; / Logout** in the header
+Five pages, one file each (see `js/pages/`):
+
+- **Overview** - five stat tiles with deltas and sparklines (open alerts, critical,
+  high, hosts seen, detection coverage), an alerts-by-severity bar, a coverage meter
+  with a "N rules blind" banner that links to the Rules page, an hourly
+  events/alerts chart drawn as inline SVG (no chart library), the top MITRE tactics,
+  the latest alerts and the latest events.
+- **Alerts** - severity / status / ack filter chips, a search box, a table, and a
+  right-side drawer with the full detail: status dropdown (New / Investigating /
+  Resolved / False Positive), a **separate** acknowledge toggle, the contributing
+  events and a kill-chain timeline of the other alerts for the same host or account,
+  in time order, tagged with their tactic.
+- **Detection Rules** - all 28 families with their audit-policy state, and for a
+  BLIND family the reason and the exact `auditpol` command that fixes it.
+- **Events** - the last 300 normalised events, newest first, with the endpoint's
+  filters (event id, host, user, substring).
+- **Settings** - read-only: version, poll/bind/port, session and rate limits,
+  forwarding on/off and destination host, the audit preflight and the account names
+  with creation dates. No secret is ever rendered.
+
+Assets, Attack Paths and Reports are rendered as disabled "Soon" items: no routes, no
+pages. The top search box filters the table on the current page only, and the range
+selector is fixed at 24 hours - neither invents an endpoint. The header carries the
+health pill (green ok / amber catching up / red blind, from `/api/overview.health`),
+the open-alert count on the sidebar badge, and "DEMO DATA" **only** when the monitor
+was started with `-DemoData`.
+
+The front end is split so a bug is easy to place: `css/tokens|base|layout|components|pages|login.css`,
+`js/api.js` (the only caller of the API), `js/state.js` (store + polling that pauses
+while the tab is hidden), `js/ui.js` (DOM helpers, formatting, badges, inline-SVG
+sparkline, toasts), `js/router.js` (the `#/overview`-style hash router),
+`js/pages/*.js` (one page per file) and `js/app.js` (boot). Each file starts with a
+comment saying what it owns, and each has one `console.error` path tagged with the
+page name. Nothing is inline: no style or script element, no `on*` attribute, and no
+`innerHTML` assignment anywhere - every dynamic string goes through `textContent`.
+Files are served from a **strict allowlist** (exact name, exact content type), so an
+unknown path or a `../` traversal is a plain 404.
 
 ## Detection coverage (28 rule families)
 
@@ -298,7 +340,7 @@ event log, no HTTP and no network needed - by a runner that drives the same
 functions the live monitor uses:
 
 ```powershell
-.\tests\run-tests.ps1      # 272 assertions, exit code 1 on any failure
+.\tests\run-tests.ps1      # 536 assertions, exit code 1 on any failure
 ```
 
 It covers detection behaviour in both directions, dedupe-per-entity, the
@@ -313,8 +355,15 @@ engine needs, and the fallback), the hardening round (the request-body guard's
 411/413 boundaries, the idle-vs-catching-up rule, sessions ending with their
 account, the public-health / authenticated-status split, the 5 s watermark overlap
 and that the overlap is not double-counted, paged oldest-first polls that lose
-nothing across a page boundary, and PBKDF2 pinned to the RFC 6070 vectors), then
-replays all 19 fixtures in
+nothing across a page boundary, and PBKDF2 pinned to the RFC 6070 vectors) and the
+v2.3 round (the stalled-body watchdog: the C# reader's exact/short/empty reads, a
+real loopback stall abandoned inside 3s, the flag/counter/abort, the three-stall
+block and its Retry-After; the dashboard backend: the ring buffer's exact field set
+and its secret-free guarantee, host/user/ip collection and caps, hourly buckets and
+their 24-hour window, the MITRE parsing, the alert object and the dedupe
+contribution, and all four payloads with their limits, filters and validation; and
+the new front end: the file layout, the allowlist, no inline code, no innerHTML, the
+design tokens, and every mockup-vs-spec rule), then replays all 19 fixtures in
 `tests/fixtures/`. See `tests/README.md`.
 
 ## Forwarding to the web platform

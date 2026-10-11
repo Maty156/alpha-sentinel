@@ -1,0 +1,62 @@
+/* tokens.css - OWNER: the design tokens. Colours, type scale, spacing, radii.
+   Nothing else here: every other stylesheet reads these variables only.
+   Crimson is the BRAND colour (logo, active nav, primary button). Severity
+   colours are deliberately separate and never crimson. */
+:root {
+  /* surfaces */
+  --bg-0: #0d0b10;
+  --bg-1: #15131a;
+  --bg-2: #1c1923;
+  --bg-3: #241f2e;
+  --line: #2a2533;
+  --line-2: #3a3445;
+
+  /* text (all >= 4.5:1 on --bg-0 / --bg-1) */
+  --text: #ece9f1;
+  --text-dim: #a9a2b4;
+  --text-mute: #837c95;
+
+  /* brand - crimson, BRAND ONLY */
+  --brand: #d2103c;
+  --brand-dim: #8e0b28;
+  --brand-soft: rgba(210, 16, 60, 0.14);
+
+  /* severity - never crimson */
+  --sev-critical: #ff4d6d;
+  --sev-high: #ff8a3d;
+  --sev-medium: #ffc247;
+  --sev-low: #8fa3bd;
+
+  /* state */
+  --ok: #2ec4a6;
+  --ok-soft: rgba(46, 196, 166, 0.14);
+  --warn: #ffb020;
+  --warn-soft: rgba(255, 176, 32, 0.14);
+  --bad: #ff4d6d;
+  --bad-soft: rgba(255, 77, 109, 0.14);
+
+  /* type */
+  --font: "Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  --fs-base: 15px;
+  --fs-table: 14px;
+  --fs-tile: 30px;
+  --fs-h1: 20px;
+  --fs-h2: 15px;
+  --fs-cap: 12px;
+  --lh: 1.45;
+
+  /* space */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-5: 22px; --s-6: 30px;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --radius-pill: 999px;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  /* layout */
+  --sidebar-w: 224px;
+  --sidebar-w-collapsed: 62px;
+  --topbar-h: 58px;
+  --drawer-w: 470px;
+}

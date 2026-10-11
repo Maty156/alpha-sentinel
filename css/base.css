@@ -1,0 +1,55 @@
+/* base.css - OWNER: reset, typography, scrollbars, focus, motion, empty states.
+   No component or page rules here. */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg-0);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-base);
+  line-height: var(--lh);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4 { margin: 0; font-weight: 600; }
+h1 { font-size: var(--fs-h1); letter-spacing: 0.2px; }
+h2 { font-size: var(--fs-h2); }
+p { margin: 0 0 var(--s-3); }
+a { color: var(--text); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, kbd, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+small, .caption { font-size: var(--fs-cap); color: var(--text-mute); }
+hr { border: 0; border-top: 1px solid var(--line); margin: var(--s-3) 0; }
+table { border-collapse: collapse; width: 100%; }
+button, input, select, textarea { font: inherit; color: inherit; }
+img, svg { max-width: 100%; }
+
+/* visible keyboard focus everywhere */
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* thin dark scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: var(--radius-pill); }
+*::-webkit-scrollbar-thumb:hover { background: #4a4358; }
+
+/* empty and error states, used by every page */
+.state { padding: var(--s-6) var(--s-4); text-align: center; color: var(--text-mute); }
+.state .state-title { color: var(--text-dim); font-size: var(--fs-base); margin-bottom: var(--s-1); }
+.state .state-hint { font-size: var(--fs-cap); }
+.state-error .state-title { color: var(--bad); }
+[hidden] { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
