@@ -1031,6 +1031,7 @@ function Add-ObservedEvent($channel, $fields, $matchedRule, $when = $null) {
   if ($null -eq $hb.startTiles) { $hb.startTiles = Get-TileSnapshot }
   $hb.events = [int]$hb.events + 1
   Update-HostSeen $fields $false
+  Update-IpSeen $fields $false
 }
 
 # ---- one raised alert ------------------------------------------------------
@@ -1355,6 +1356,297 @@ function Get-AlertRows {
     @{ n = 'Count'; e = { if ($_.Count) { [int]$_.Count } else { 1 } } },
     Events)
 }
+
+
+# ============================================================
+# ASSETS - hosts, accounts and source addresses seen in the window
+# ============================================================
+# Derived ONLY from the observability state the poller already collects (the
+# hosts-seen map, the events ring buffer, the alert list) - no new parsing, no
+# raw message bodies, no secrets, and no invented risk scores. Everything is
+# in-memory and resets with the process.
+$Script:AssetIp = @{}           # normalised ip -> @{ firstSeen; lastSeen; accounts; hosts; failedLogons; alertCount; maxSeverity }
+
+# Test-InternalIp as a plain function (no classes): RFC1918, loopback, link-local
+function Test-InternalIp([string]$Ip) {
+  if (-not $Ip) { return $false }
+  $v = "$Ip".Trim()
+  if ($v -eq '-' -or $v -eq '') { return $false }
+  if ($v -match '^::1$|^127\.' -or $v -match '^::ffff:127\.') { return $true }                 # loopback
+  if ($v -match '^fe80:' -or $v -match '^169\.254\.') { return $true }                          # link-local
+  if ($v -match '^::ffff:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})') {                         # mapped v4
+    $o = [int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]
+    if ($o[0] -eq 10) { return $true }
+    if ($o[0] -eq 192 -and $o[1] -eq 168) { return $true }
+    if ($o[0] -eq 172 -and $o[1] -ge 16 -and $o[1] -le 31) { return $true }
+    return $false
+  }
+  if ($v -match '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') {
+    $o = [int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]
+    if ($o[0] -eq 10) { return $true }
+    if ($o[0] -eq 192 -and $o[1] -eq 168) { return $true }
+    if ($o[0] -eq 172 -and $o[1] -ge 16 -and $o[1] -le 31) { return $true }
+    return $false
+  }
+  # a global IPv6 (not fc00-fdff which is unique-local) - keep it simple: fc/fd are internal
+  if ($v -match '^(fc|fd)') { return $true }
+  return $false
+}
+
+# ' ::ffff:10.0.0.5' -> '10.0.0.5'; lowercase; trimmed
+function Get-NormalisedIp([string]$Ip) {
+  if (-not $Ip) { return '' }
+  $v = "$Ip".Trim().ToLower()
+  if ($v -match '^::ffff:(.+)$') { return $Matches[1].Trim('['), '' -join '' }
+  return ($v -replace '^\[|\]$', '')
+}
+
+$SevScore = @{ Critical = 3; High = 2; Medium = 1; Low = 0 }
+
+function Get-MaxSeverity([string]$current, [string]$candidate) {
+  $c = "$current"
+  $n = "$candidate"
+  if (-not $n) { return $c }
+  if (-not $c) { return $n }
+  if (-not $SevScore.ContainsKey($n)) { return $c }
+  if (-not $SevScore.ContainsKey($c)) { return $n }
+  if ($SevScore[$n] -gt $SevScore[$c]) { return $n }
+  return $c
+}
+
+# Records one observed event into the ip map (called from Add-ObservedEvent).
+function Update-IpSeen($fields, [bool]$isAlert) {
+  if (-not $fields) { return }
+  $raw = "$($fields.sourceIp)"
+  if (-not $raw -or $raw -eq '' -or $raw -eq '-') { return }
+  $ip = Get-NormalisedIp $raw
+  if (-not $ip) { return }
+  $now = (Get-Date).ToUniversalTime().ToString("o")
+  if (-not $Script:AssetIp.ContainsKey($ip)) {
+    $Script:AssetIp[$ip] = [PSCustomObject]@{
+      ip = $ip; firstSeen = $now; lastSeen = $now
+      accounts = @(); hosts = @()
+      failedLogons = 0; alertCount = 0; maxSeverity = ''
+    }
+  }
+  $rec = $Script:AssetIp[$ip]
+  $rec.lastSeen = $now
+  $u = ConvertTo-AccountName "$($fields.accountName)"
+  if (-not $u) { $u = ConvertTo-AccountName "$($fields.subjectUserName)" }
+  if ($u) {
+    $accs = @($rec.accounts)
+    if ($accs -notcontains $u) {
+      $accs += $u
+      if ($accs.Count -gt 20) { $accs = @($accs | Select-Object -Last 20) }
+      $rec.accounts = $accs
+    }
+  }
+  $h = "$($fields.hostname)"
+  if ($h) {
+    $hosts = @($rec.hosts)
+    if ($hosts -notcontains $h) {
+      $hosts += $h
+      if ($hosts.Count -gt 20) { $hosts = @($hosts | Select-Object -Last 20) }
+      $rec.hosts = $hosts
+    }
+  }
+  if ("$($fields.eventId)" -eq '4625') { $rec.failedLogons = [int]$rec.failedLogons + 1 }
+  if ($isAlert) {
+    $rec.alertCount = [int]$rec.alertCount + 1
+  }
+}
+
+# The account type is only user vs computer - anything else would be a guess.
+function Get-AccountType([string]$Name) {
+  if ("$Name".EndsWith('$')) { return 'computer' }
+  return 'user'
+}
+
+# --- the payloads ----------------------------------------------------------
+function Get-AssetMap {
+  # hosts come from the observability map; accounts and their flags are derived
+  # from the events ring buffer and the (non-self-test) alert list
+  $hosts = @{}
+  foreach ($h in $Script:ObsHosts.Values) {
+    $hosts["$($h.host)"] = [PSCustomObject]@{
+      kind = 'host'; name = "$($h.host)"
+      firstSeen = "$($h.firstSeen)"; lastSeen = "$($h.lastSeen)"
+      eventCount = [int]$h.eventCount; alertCount = [int]$h.alertCount
+      maxSeverity = ''
+      users = @($h.users); ips = @($h.ips)
+      openAlerts = @(); tactics = @()
+    }
+  }
+  $accounts = @{}
+  $eventsByAccount = @{}
+  foreach ($e in $Script:ObsEvents) {
+    $u = ConvertTo-AccountName "$($e.user)"
+    if (-not $u) { continue }
+    if (-not $eventsByAccount.ContainsKey($u)) { $eventsByAccount[$u] = @() }
+    $eventsByAccount[$u] += $e
+  }
+  $alertsByAccount = @{}
+  foreach ($a in $Script:Alerts) {
+    $u = ConvertTo-AccountName "$($a.Account)"
+    if ($u -and -not $alertsByAccount.ContainsKey($u)) { $alertsByAccount[$u] = @() }
+    if ($u) { $alertsByAccount[$u] += $a }
+  }
+  foreach ($u in $eventsByAccount.Keys) {
+    $evs = @($eventsByAccount[$u])
+    $last = $evs | Sort-Object time -Descending | Select-Object -First 1
+    $rec = [PSCustomObject]@{
+      kind = 'account'; name = $u
+      type = Get-AccountType $u
+      firstSeen = "$($evs | Sort-Object time | Select-Object -First 1 | ForEach-Object { $_.time })"
+      lastSeen  = "$($last.time)"
+      hosts = @()
+      ips = @()
+      alertCount = 0; maxSeverity = ''
+      lastEventIds = @($evs | Sort-Object time -Descending | Select-Object -First 10 | ForEach-Object { "$($_.eventId)" })
+      flags = @()
+    }
+    $seenHosts = @(); $seenIps = @()
+    foreach ($e in $evs) {
+      if ("$($e.host)" -and $seenHosts -notcontains "$($e.host)") { $seenHosts += "$($e.host)" }
+      $ip = Get-NormalisedIp "$($e.sourceIp)"
+      if ($ip -and $seenIps -notcontains $ip) { $seenIps += $ip }
+    }
+    if ($seenHosts.Count -gt 20) { $seenHosts = @($seenHosts | Select-Object -Last 20) }
+    if ($seenIps.Count -gt 20) { $seenIps = @($seenIps | Select-Object -Last 20) }
+    $rec.hosts = $seenHosts
+    $rec.ips = $seenIps
+    $accounts[$u] = $rec
+  }
+  # fold the alerts into every kind
+  foreach ($a in $Script:Alerts) {
+    if ($a.SelfTest) { continue }
+    $sev = "$($a.Severity)"
+    $tactic = if ($a.Tactic) { "$($a.Tactic)" } else { Get-MitreTactic "$($a.Category)" }
+    $h = "$($a.Host)"
+    if ($h -and $hosts.ContainsKey($h)) {
+      $hosts[$h].alertCount = [int]$hosts[$h].alertCount + 1
+      $hosts[$h].maxSeverity = Get-MaxSeverity $hosts[$h].maxSeverity $sev
+      $tacs = @($hosts[$h].tactics)
+      if ($tacs -notcontains $tactic) { $tacs += $tactic }
+      $hosts[$h].tactics = $tacs
+      if ($a.Status -eq 'New' -or $a.Status -eq 'Investigating' -or -not $a.Status) {
+        $open = @($hosts[$h].openAlerts)
+        $open += [int]$a.Id
+        if ($open.Count -gt 20) { $open = @($open | Select-Object -Last 20) }
+        $hosts[$h].openAlerts = $open
+      }
+    }
+    $u = ConvertTo-AccountName "$($a.Account)"
+    if ($u -and $accounts.ContainsKey($u)) {
+      $accounts[$u].alertCount = [int]$accounts[$u].alertCount + 1
+      $accounts[$u].maxSeverity = Get-MaxSeverity $accounts[$u].maxSeverity $sev
+      # flags come ONLY from fired rules - a description fragment is evidence,
+      # an invented risk score is not
+      $flag = $null
+      if ("$($a.RuleKey)" -eq 'privilege_escalation') { $flag = 'added to privileged group' }
+      elseif ("$($a.RuleKey)" -eq 'asrep_roasting') { $flag = 'AS-REP roastable change' }
+      elseif ("$($a.RuleKey)" -eq 'account_control_changed' -and "$($a.Description)" -match 'pre-authentication') { $flag = 'AS-REP roastable change' }
+      elseif ("$($a.RuleKey)" -eq 'account_created') { $flag = 'account created' }
+      elseif ("$($a.RuleKey)" -eq 'account_deleted') { $flag = 'account deleted' }
+      elseif ("$($a.RuleKey)" -eq 'password_reset_by_admin') { $flag = 'password reset by admin' }
+      elseif ("$($a.RuleKey)" -eq 'kerberoasting') { $flag = 'kerberoastable ticket requested' }
+      elseif ("$($a.RuleKey)" -eq 'account_lockout_storm' -or "$($a.RuleKey)" -eq 'brute_force_single_account') { $flag = 'brute-forced' }
+      elseif ("$($a.RuleKey)" -eq 'suspicious_remote_logon') { $flag = 'remote logon' }
+      elseif ("$($a.RuleKey)" -eq 'dcsync_replication') { $flag = 'directory replication' }
+      elseif ("$($a.RuleKey)" -eq 'log_tampering') { $flag = 'log tampering' }
+      if ($flag) {
+        $fl = @($accounts[$u].flags)
+        if ($fl -notcontains $flag) { $fl += $flag }
+        if ($fl.Count -gt 10) { $fl = @($fl | Select-Object -Last 10) }
+        $accounts[$u].flags = $fl
+      }
+    }
+    $ip = Get-NormalisedIp "$($a.SourceIp)"
+    if ($ip -and $Script:AssetIp.ContainsKey($ip)) {
+      $Script:AssetIp[$ip].alertCount = [int]$Script:AssetIp[$ip].alertCount + 1
+      $Script:AssetIp[$ip].maxSeverity = Get-MaxSeverity $Script:AssetIp[$ip].maxSeverity $sev
+    }
+  }
+  $ips = @{}
+  foreach ($k in $Script:AssetIp.Keys) {
+    $r = $Script:AssetIp[$k]
+    $ips[$k] = [PSCustomObject]@{
+      kind = 'ip'; address = $k
+      firstSeen = "$($r.firstSeen)"; lastSeen = "$($r.lastSeen)"
+      accounts = @($r.accounts); hosts = @($r.hosts)
+      failedLogons = [int]$r.failedLogons
+      alertCount = [int]$r.alertCount
+      internal = Test-InternalIp $k
+      maxSeverity = "$($r.maxSeverity)"
+    }
+  }
+  return @{ hosts = $hosts; accounts = $accounts; ips = $ips }
+}
+
+function Get-AssetsPayload($query) {
+  $kind = Get-QueryValue $query 'kind'
+  if (-not $kind) { $kind = 'host' }
+  if ($kind -notin @('host', 'account', 'ip')) {
+    return [PSCustomObject]@{ error = 'kind must be host, account or ip.'; status = 400 }
+  }
+  $limit = 200
+  $rawLimit = Get-QueryValue $query 'limit'
+  if ($rawLimit) {
+    $parsed = 0
+    if ([int]::TryParse($rawLimit, [ref]$parsed)) {
+      if ($parsed -gt 0) { $limit = $parsed }
+      if ($limit -gt 500) { $limit = 500 }
+    }
+  }
+  $q = Get-QueryValue $query 'q'
+  if ($q.Length -gt 120) { $q = $q.Substring(0, 120) }
+  $map = Get-AssetMap
+  $rows = @()
+  if ($kind -eq 'host') { $rows = @($map.hosts.Values) }
+  elseif ($kind -eq 'account') { $rows = @($map.accounts.Values) }
+  else { $rows = @($map.ips.Values) }
+  if ($q) {
+    $needle = $q.ToLower()
+    $rows = @($rows | Where-Object {
+      $hit = "$($_.name)".ToLower().Contains($needle) -or "$($_.address)".ToLower().Contains($needle)
+      if (-not $hit -and $_.users) { $hit = @($_.users | Where-Object { "$_".ToLower().Contains($needle) }).Count -gt 0 }
+      if (-not $hit -and $_.accounts) { $hit = @($_.accounts | Where-Object { "$_".ToLower().Contains($needle) }).Count -gt 0 }
+      $hit
+    })
+  }
+  $total = $rows.Count
+  # busiest first (the map rows are not ordered)
+  $rows = @($rows | Sort-Object -Property @{ e = { ([int]$_.alertCount * 1000000) + [int]$_.eventCount } } -Descending)
+  if ($rows.Count -gt $limit) { $rows = @($rows | Select-Object -First $limit) }
+  return [PSCustomObject]@{ assets = $rows; count = $rows.Count; total = $total; limit = $limit; kind = $kind }
+}
+
+function Get-AssetDetail($kind, $id) {
+  if ($kind -notin @('host', 'account', 'ip')) {
+    return [PSCustomObject]@{ error = 'kind must be host, account or ip.'; status = 400 }
+  }
+  $map = Get-AssetMap
+  $row = $null
+  if ($kind -eq 'host') {
+    if ($map.hosts.ContainsKey($id)) { $row = $map.hosts[$id] }
+  } elseif ($kind -eq 'account') {
+    if ($map.accounts.ContainsKey($id)) { $row = $map.accounts[$id] }
+  } else {
+    $nip = Get-NormalisedIp $id
+    if ($map.ips.ContainsKey($nip)) { $row = $map.ips[$nip] }
+  }
+  if (-not $row) { return [PSCustomObject]@{ error = 'No such asset.'; status = 404 } }
+  # the activity timeline: this asset's events from the ring buffer, newest first
+  $needle = "$id".ToLower()
+  $timeline = @($Script:ObsEvents | Where-Object {
+    ("$($_.host)".ToLower() -eq $needle) -or
+    (ConvertTo-AccountName "$($_.user)".ToLower()) -eq $needle -or
+    (Get-NormalisedIp "$($_.sourceIp)") -eq (Get-NormalisedIp $needle)
+  } | Sort-Object time -Descending | Select-Object -First 50)
+  return [PSCustomObject]@{ asset = $row; timeline = $timeline }
+}
+
+
 
 # ---- request body limits (web DoS guard) ----------------------------------
 # A POST body is attacker-controlled and this server is SINGLE-THREADED, so an
@@ -2896,6 +3188,7 @@ $Script:StaticFiles = @{
   '/js/pages/rules.js'    = @{ file = 'js/pages/rules.js';    type = 'application/javascript; charset=utf-8' }
   '/js/pages/events.js'   = @{ file = 'js/pages/events.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/settings.js' = @{ file = 'js/pages/settings.js'; type = 'application/javascript; charset=utf-8' }
+  '/js/pages/assets.js'   = @{ file = 'js/pages/assets.js';   type = 'application/javascript; charset=utf-8' }
 }
 
 
@@ -3177,6 +3470,21 @@ function Invoke-Handler($ctx) {
         } | ConvertTo-Json -Depth 4)
       }
       # ---- v2.3 read-only dashboard API (GET, session required, JSON) --------
+      '^/api/assets$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        $as = Get-AssetsPayload $ctx.Request.QueryString
+        if ($as.error) { Send-Json $res ('{"error":"' + $as.error + '"}') $as.status; return }
+        Send-Json $res ('{"assets":' + (ConvertTo-JsonArray $as.assets) +
+                        ',"count":' + $as.count + ',"total":' + $as.total + ',"limit":' + $as.limit + ',"kind":"' + $as.kind + '"}')
+      }
+      '^/api/assets/(host|account|ip)/(.+)$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        # the id is looked up IN THE MAP - it never becomes a path or a regex
+        $detail = Get-AssetDetail $Matches[1] ([uri]::UnescapeDataString("$($Matches[2])"))
+        if ($detail.error) { Send-Json $res ('{"error":"' + $detail.error + '"}') $detail.status; return }
+        Send-Json $res (('{"asset":' + ($detail.asset | ConvertTo-Json -Depth 6) +
+                         ',"timeline":' + (ConvertTo-JsonArray $detail.timeline) + '}'))
+      }
       '^/api/overview$' {
         if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
         Send-Json $res ((Get-OverviewPayload) | ConvertTo-Json -Depth 6)

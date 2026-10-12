@@ -169,6 +169,7 @@ try {
     $Script:ObsEvents = New-Object System.Collections.Generic.List[object]
     $Script:ObsHosts = @{}
     $Script:ObsHours = @{}
+    $Script:AssetIp = @{}
     $Script:LastNormFields = $null
     $Script:LastEventTime = $null
     $Script:LastMatchedRule = $null
@@ -1447,12 +1448,12 @@ try {
 
   # --- mockup vs spec -------------------------------------------------------
   $dash = Get-RepoText 'dashboard.html'
-  Assert-True ([regex]::Matches($dash, 'nav-item disabled').Count -eq 3) 'the three not-built-yet items render as disabled nav items'
-  Assert-True ([regex]::Matches($dash, 'nav-soon').Count -eq 3) 'and are marked Soon'
-  foreach ($soon in @('Assets', 'Attack Paths', 'Reports')) {
-    Assert-True ($dash.Contains($soon)) ('   ' + $soon + ' is shown (disabled)')
-  }
-  Assert-True (-not ($dash -match 'href="#/(assets|paths|reports)"')) 'and none of them has a route'
+  # Attack Paths (a BloodHound-style graph) is the one greyed "Soon" item that
+  # stays greyed.  Assets, Attack Chains and Reports become live pages in their
+  # own parts, and each of those parts asserts its own nav link and route - so
+  # this block only asserts what is true of every part.
+  Assert-True ($dash.Contains('Attack Paths')) 'Attack Paths is still shown (disabled)'
+  Assert-True (-not ($dash -match 'href="#/paths"')) 'Attack Paths has no route'
   Assert-True ($dash.Contains('id="search"')) 'the top search box is rendered'
   Assert-True ($dash.Contains('id="range"')) 'the range selector is rendered'
   Assert-True ([regex]::Matches($dash, '<option').Count -eq 1) 'and is fixed at one option (24 h) - no new endpoint behind it'
@@ -1645,6 +1646,89 @@ try {
   Assert-True ($apiJs.Contains("err.name === 'AbortError'")) 'an aborted fetch is not logged'
   Assert-True ($apiJs.Contains("err.name === 'NavigationError'")) 'nor a navigation-cancelled one'
   Assert-True ($apiJs.Contains('logFail(page, err)')) 'real failures still log once, with the page name'
+
+  Write-Host ""
+  Write-Host "== v2.4 part 1: assets ==" -ForegroundColor Cyan
+  # the Assets page is real from this part on
+  $dashA = Get-RepoText 'dashboard.html'
+  Assert-True ($dashA -match '<a class="nav-item" href="#/assets" data-page="assets">') 'Assets is a live nav link, not a Soon item'
+  Assert-True ((Get-RepoText 'js/router.js').Contains("'/assets': 'assets'")) '#/assets is routed'
+  Assert-True ($dashA.Contains('/js/pages/assets.js')) 'and the page module is loaded by the shell'
+
+  Reset-Engine
+  $t0 = (Get-Date).ToUniversalTime()
+  Add-ObservedEvent 'Security' @{ eventId = '4625'; hostname = 'DC01'; accountName = 'CN=attacker,OU=Corp,DC=x,DC=local'; sourceIp = '::ffff:10.0.0.7' } 'brute_force_single_account' $t0
+  Add-ObservedEvent 'Security' @{ eventId = '4728'; hostname = 'DC01'; accountName = 'attacker'; sourceIp = '10.0.0.7' } 'privilege_escalation' $t0.AddMinutes(1)
+  Add-ObservedEvent 'Security' @{ eventId = '4769'; hostname = 'DC02'; accountName = 'WKS01$'; sourceIp = '8.8.8.8' } 'kerberoasting' $t0.AddMinutes(2)
+  $a1 = New-Alert 'brute_force_single_account' '8 failed logons against attacker' 'High' @{ hostname = 'DC01'; accountName = 'attacker'; sourceIp = '10.0.0.7'; eventId = '4625' }
+  $Script:Alerts.Add($a1); Add-ObservedAlert $a1
+  $a2 = New-Alert 'privilege_escalation' 'added to Domain Admins' 'Critical' @{ hostname = 'DC01'; accountName = 'attacker'; sourceIp = '10.0.0.7'; eventId = '4728' }
+  $Script:Alerts.Add($a2); Add-ObservedAlert $a2
+
+  # --- shapes ---------------------------------------------------------------
+  $qEmpty = New-Object System.Collections.Specialized.NameValueCollection
+  $hosts = Get-AssetsPayload $qEmpty
+  Assert-True ($hosts.kind -eq 'host') 'kind defaults to host'
+  Assert-True ($hosts.assets[0].PSObject.Properties.Name -contains 'maxSeverity') 'a host asset carries maxSeverity'
+  foreach ($need in @('name', 'firstSeen', 'lastSeen', 'eventCount', 'alertCount', 'users', 'ips', 'openAlerts', 'tactics')) {
+    Assert-True ($hosts.assets[0].PSObject.Properties.Name -contains $need) ('   host asset has ' + $need)
+  }
+  $qAcc = New-Object System.Collections.Specialized.NameValueCollection; $qAcc.Add('kind', 'account')
+  $accs = Get-AssetsPayload $qAcc
+  foreach ($need in @('name', 'type', 'firstSeen', 'lastSeen', 'hosts', 'ips', 'alertCount', 'maxSeverity', 'lastEventIds', 'flags')) {
+    Assert-True ($accs.assets[0].PSObject.Properties.Name -contains $need) ('   account asset has ' + $need)
+  }
+  $qIp = New-Object System.Collections.Specialized.NameValueCollection; $qIp.Add('kind', 'ip')
+  $ips = Get-AssetsPayload $qIp
+  foreach ($need in @('address', 'firstSeen', 'lastSeen', 'accounts', 'hosts', 'failedLogons', 'alertCount', 'internal', 'maxSeverity')) {
+    Assert-True ($ips.assets[0].PSObject.Properties.Name -contains $need) ('   ip asset has ' + $need)
+  }
+
+  # --- DN stripping, account types, ::ffff:, internal ------------------------
+  $att = @($accs.assets | Where-Object { $_.name -eq 'attacker' })[0]
+  Assert-True ($null -ne $att) 'the CN= DN collapsed into the plain account'
+  Assert-True ($att.type -eq 'user') 'a plain account is typed user'
+  $wks = @($accs.assets | Where-Object { $_.name -eq 'WKS01$' })[0]
+  Assert-True ($null -ne $wks -and $wks.type -eq 'computer') 'an account ending in $ is typed computer'
+  $ips2 = Get-AssetsPayload $qIp
+  $ip7 = @($ips2.assets | Where-Object { $_.address -eq '10.0.0.7' })[0]
+  Assert-True ($null -ne $ip7) '::ffff:10.0.0.7 was normalised to 10.0.0.7'
+  Assert-True ($ip7.internal) 'an RFC1918 address is internal'
+  Assert-True ([int]$ip7.failedLogons -eq 1) ('the failed logon was counted on the source address (got ' + $ip7.failedLogons + ')')
+  $ip8 = @($ips.assets | Where-Object { $_.address -eq '8.8.8.8' })[0]
+  Assert-True ($null -ne $ip8 -and -not $ip8.internal) 'a public address is not internal'
+  Assert-True ((Get-NormalisedIp ' ::FFFF:192.168.1.5 ') -eq '192.168.1.5') 'normalisation is case- and space-insensitive'
+  Assert-True (Test-InternalIp '127.0.0.1' -and (Test-InternalIp '169.254.1.2')) 'loopback and link-local are internal'
+  Assert-True (-not (Test-InternalIp '2001:db8::1')) 'a global v6 address is not'
+
+  # --- flags derive only from fired rules ----------------------------------
+  Assert-True ($att.flags -contains 'added to privileged group') 'a privilege-escalation alert leaves a flag'
+  Assert-True ($att.flags -contains 'brute-forced') 'a brute-force alert leaves a flag'
+  Assert-True ($att.alertCount -eq 2) 'both alerts counted on the account'
+  Assert-True ("$($att.maxSeverity)" -eq 'Critical') 'and the worst severity is kept'
+
+  # --- host rollup ----------------------------------------------------------
+  $dc = @($hosts.assets | Where-Object { $_.name -eq 'DC01' })[0]
+  Assert-True ($dc.openAlerts -contains 1 -and $dc.openAlerts -contains 2) 'the host carries its open alert ids'
+  Assert-True ($dc.tactics.Count -ge 2) 'and the tactics that fired on it'
+
+  # --- validation -----------------------------------------------------------
+  $qBad = New-Object System.Collections.Specialized.NameValueCollection; $qBad.Add('kind', 'banana')
+  $bad = Get-AssetsPayload $qBad
+  Assert-True ($bad.status -eq 400 -and $bad.error) 'an unknown kind is refused with 400'
+  $qLim = New-Object System.Collections.Specialized.NameValueCollection; $qLim.Add('limit', '9999')
+  Assert-True ((Get-AssetsPayload $qLim).limit -eq 500) 'the limit is clamped to 500'
+  $qQ = New-Object System.Collections.Specialized.NameValueCollection; $qQ.Add('q', 'attack')
+  Assert-True ((Get-AssetsPayload $qQ).total -ge 1) 'q is a plain substring over names/users/accounts'
+  $qRe = New-Object System.Collections.Specialized.NameValueCollection; $qRe = New-Query @{ q = '.*' }
+  Assert-True ((Get-AssetsPayload $qRe).total -eq 0) 'and never a regular expression'
+  $d404 = Get-AssetDetail 'host' 'no-such-host'
+  Assert-True ($d404.status -eq 404) 'an unknown asset id is 404 (looked up in the map, never a path)'
+  $dOk = Get-AssetDetail 'host' 'DC01'
+  Assert-True ($null -ne $dOk.asset -and $dOk.timeline.Count -ge 1) 'a known asset returns its detail and timeline from the ring buffer'
+  Assert-True ($dOk.timeline[0].PSObject.Properties.Name -contains 'summary') 'and the timeline carries summaries, not raw bodies'
+  $serialisedAssets = ((Get-AssetsPayload $qAcc).assets | ConvertTo-Json -Depth 6) + (($ips.assets | ConvertTo-Json -Depth 6))
+  Assert-True (-not $serialisedAssets.Contains('S3CR3T')) 'no secret material reaches an asset payload'
 
   Write-Host ""
   Write-Host "== fixture replay ==" -ForegroundColor Cyan
