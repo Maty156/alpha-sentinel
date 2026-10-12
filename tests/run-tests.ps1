@@ -1804,7 +1804,7 @@ try {
   $Script:ObsHosts = @{}
   $Script:AssetIp = @{}
   # seed in the PAST: the report's default period ends NOW, so a future-dated
-  # alert is (correctly) outside it — the first draft seeded +2/+4 min and the
+  # alert is (correctly) outside it - the first draft seeded +2/+4 min and the
   # report excluded them, as it should
   $now = (Get-Date).ToUniversalTime().AddMinutes(-10)
   Seed-Alert 30 'privilege_escalation' 'Critical' 'attacker' 'DC01' '10.0.0.7' $now
