@@ -1,5 +1,84 @@
 ﻿# Changelog
 
+## v2.4.0
+
+Assets, Attack Chains and Reports, plus two v2.3.1 leftovers. **757 assertions**
+(`tests/run-tests.ps1`), up from 600.
+
+### Part 0 - the health pill says why, and aborted fetches stay silent
+
+1. **The pill names the reason.** `health` is no longer a bare string: it is
+   `{ state, reasons[] }` on `/api/overview`. **Blind** (red) when a rule family
+   cannot fire, **Unverified** (amber) when the audit policy is unreadable,
+   **Catching up** (amber) only when the poller is behind, **Healthy** (green)
+   otherwise. When several apply the worst is the headline and every reason is in
+   the pill's tooltip, worst first, each with a sentence saying what it means.
+2. **An aborted fetch is not an error.** `api.js` treats `AbortError` /
+   `NavigationError` as silent - clicking away from a page with a poll in flight
+   no longer logs a failure. Real failures still log once, tagged with the page.
+
+### Part 1 - Assets
+
+`GET /api/assets?kind=host|account|ip&q=&limit=` (limit clamped to 500, `kind`
+validated with a 400 on junk, `q` a plain substring match) and
+`GET /api/assets/<kind>/<id>` (the id is looked up in the map - never a path or a
+regex - and an unknown id is a 404). All of it is built from what the window
+actually observed: the hosts-seen map, a new capped ip map (oldest evicted) and
+the alert state.
+
+- **host** - name, first/last seen, event and alert counts, max severity, the
+  users and source addresses seen on it, its open alert ids and its tactics.
+- **account** - DN prefixes stripped to the account name, type user vs computer
+  (a trailing `$`, and *only* that - nothing is guessed), first/last seen, hosts,
+  addresses, alert count, max severity, recent event ids and flags derived
+  **only** from fired rules ("added to a privileged group", "Security log
+  cleared", ...). No invented risk scores.
+- **ip** - `::ffff:` normalised, first/last seen, accounts and hosts, a failed
+  logon count, alert count, max severity, and an `internal` flag (RFC1918,
+  loopback and link-local are internal).
+
+New `#/assets` page: Hosts / Accounts / IPs tabs, search, sortable columns (name,
+last seen, alerts, max severity), a row opens a right-side drawer with the detail,
+its open alerts linked to the Alerts page, and its activity timeline from the
+event ring buffer. Empty and error states are explicit.
+
+### Part 2 - Attack Chains
+
+`GET /api/chains` groups the open alerts that share an entity - same account OR
+same host OR same source IP - inside a 60-minute sliding window, ordered by time.
+Each chain carries a stable hash id, a title ("attacker1 on DC01"), its entities,
+first/last seen, its max severity, its alerts and its tactics in MITRE kill-chain
+order. **A chain needs at least two alerts**; a lone alert is not a chain. The
+grouping is deterministic: same alerts in, same chains out.
+
+New `#/chains` page: the chain list on the left, and the selected chain drawn as
+an 11-step kill-chain strip with the alerts under each tactic they touched. Every
+alert opens that alert's drawer on the Alerts page.
+
+### Part 3 - Engagement report
+
+`GET /api/report?from=&to=` renders the period's report: executive summary,
+coverage and limitations (including how many families are unverified or blind),
+findings by severity / status / tactic, attack chains, affected assets, the top
+alerts, a remediation checklist (deduped by recommendation, with the alert count)
+and an alert-timeline appendix. Empty windows say so in plain words. The dates are
+validated: junk is refused and a range over 31 days is refused, both with 400.
+
+New `#/reports` page: the date form, range presets, and the report rendered as a
+framed document with `css/print.css` so it prints to PDF cleanly.
+
+### Housekeeping
+
+- Every new file is in the strict static allowlist (`js/pages/assets.js`,
+  `js/pages/chains.js`, `js/pages/reports.js`, `css/print.css`) - unknown paths
+  are still a plain 404.
+- Each new endpoint takes a session, is GET-only, and returns JSON; 401 / 400 /
+  404 / 405 are all covered by tests.
+- No raw event message bodies, no secrets and no credentials appear in any new
+  payload, and `GET /api/settings` still exposes no secret.
+- No detection rule logic was touched: the 28 families and their thresholds are
+  unchanged.
+
 ## v2.3.1
 
 Review fixes only - no new features. **599 assertions** (`tests/run-tests.ps1`).

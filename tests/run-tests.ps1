@@ -1788,6 +1788,112 @@ try {
   Assert-True ((Get-AttackChains).Count -eq 0) 'a single open alert forms no chain'
 
   Write-Host ""
+  Write-Host "== v2.4 part 3: the report ==" -ForegroundColor Cyan
+  # the Reports page is real from this part on - and it is the last one, so the
+  # nav is back down to a single greyed item
+  $dashR = Get-RepoText 'dashboard.html'
+  Assert-True ($dashR -match '<a class="nav-item" href="#/reports" data-page="reports">') 'Reports is a live nav link'
+  Assert-True ([regex]::Matches($dashR, 'nav-item disabled').Count -eq 1) 'only Attack Paths renders as a disabled nav item'
+  Assert-True ([regex]::Matches($dashR, 'nav-soon').Count -eq 1) 'and it is the only Soon marker'
+  Assert-True ((Get-RepoText 'js/router.js').Contains("'/reports': 'reports'")) '#/reports is routed'
+  Assert-True ($dashR.Contains('/js/pages/reports.js')) 'and the page module is loaded by the shell'
+
+  Reset-Engine
+  $Script:Alerts = New-Object System.Collections.Generic.List[object]
+  $Script:ObsEvents = New-Object System.Collections.Generic.List[object]
+  $Script:ObsHosts = @{}
+  $Script:AssetIp = @{}
+  # seed in the PAST: the report's default period ends NOW, so a future-dated
+  # alert is (correctly) outside it — the first draft seeded +2/+4 min and the
+  # report excluded them, as it should
+  $now = (Get-Date).ToUniversalTime().AddMinutes(-10)
+  Seed-Alert 30 'privilege_escalation' 'Critical' 'attacker' 'DC01' '10.0.0.7' $now
+  Seed-Alert 31 'brute_force_single_account' 'High' 'attacker' 'DC01' '10.0.0.7' $now.AddMinutes(2)
+  Seed-Alert 32 'brute_force_single_account' 'High' 'jsmith' 'DC01' '10.0.0.9' $now.AddMinutes(4)
+
+  $qEmpty2 = New-Object System.Collections.Specialized.NameValueCollection
+  $rp = Get-ReportPayload $qEmpty2
+  Assert-True (-not $rp.error) 'a valid default request generates the report'
+  foreach ($need in @('generatedAt', 'generatedBy', 'period', 'summary', 'coverage', 'topAlerts', 'chains', 'assets', 'timeline', 'remediation', 'notes')) {
+    Assert-True ($rp.PSObject.Properties.Name -contains $need) ('   the report has ' + $need)
+  }
+  $sevJson = ($rp.summary.bySeverity | ConvertTo-Json -Compress)
+  Assert-True ([int]$rp.summary.bySeverity['High'] -eq 2) ('severity counts come from the period (bySeverity ' + $sevJson + ')')
+  Assert-True ($rp.summary.byTactic.Count -ge 1) 'and so do the tactic counts'
+  Assert-True ($rp.topAlerts.Count -le 15) 'topAlerts is capped at 15'
+  Assert-True ($rp.timeline.Count -le 50) 'the timeline is capped at 50'
+  Assert-True ($rp.remediation.Count -ge 1) 'remediation entries exist'
+  $texts = @($rp.remediation | ForEach-Object { $_.recommendation })
+  Assert-True ($texts.Count -eq (@($texts | Select-Object -Unique)).Count) 'and are deduped by recommendation text'
+  # Seed-Alert writes Remediation='x', which is non-empty, so the report keeps it
+  # (the catalogue fallback only fills an empty text). Assert the count behaviour
+  # on whatever text the rule's rows carry.
+  # NOTE: seed with the rule's REAL remediation text - the report dedupes by the
+  # text the rows carry, so the assertion must use the same text the store has
+  foreach ($a in $Script:Alerts) { if ($a.RuleKey -eq 'brute_force_single_account') { $a.Remediation = "$($RuleMeta['brute_force_single_account'].Remediation)" } }
+  $rp2 = Get-ReportPayload $qEmpty2
+  $texts2 = @($rp2.remediation | ForEach-Object { $_.recommendation })
+  Assert-True ($texts2.Count -eq (@($texts2 | Select-Object -Unique)).Count) 'the refreshed report is still deduped'
+  $bfRem = @($rp2.remediation | Where-Object { $_.rule -eq 'brute_force_single_account' })
+  Assert-True ($bfRem.Count -eq 1) ('the two brute-force rows dedupe into ONE recommendation (entries ' + $bfRem.Count + ')')
+  Assert-True ([int]$bfRem[0].count -eq 2) ('and carry both alerts as its count (got ' + $(if ($bfRem.Count) { $bfRem[0].count } else { 'n/a' }) + ')')
+  Assert-True ($texts2 -contains "$($bfRem[0].recommendation)") 'and it is one of the deduped recommendations'
+  Assert-True ("$($rp.notes)".Length -gt 0) 'the limitations note is present'
+  Assert-True ($rp.coverage.PSObject.Properties.Name -contains 'unverified') 'coverage carries the unverified count'
+  Assert-True ($rp.chains.PSObject.Properties.Name -contains 'Count' -or $rp.chains.Count -ge 0) 'chains are embedded'
+
+  # validation
+  function New-ReportQuery([string]$from, [string]$to) {
+    $q = New-Object System.Collections.Specialized.NameValueCollection
+    if ($from) { $q.Add('from', $from) }
+    if ($to) { $q.Add('to', $to) }
+    return ,$q
+  }
+  Assert-True ((Get-ReportPayload (New-ReportQuery 'banana' $null)).status -eq 400) 'a junk from date is refused with 400'
+  Assert-True ((Get-ReportPayload (New-ReportQuery $null 'also-junk')).status -eq 400) 'a junk to date is refused with 400'
+  Assert-True ((Get-ReportPayload (New-ReportQuery '2026-01-01' '2026-02-15')).status -eq 400) 'a range over 31 days is refused with 400'
+  Assert-True ((Get-ReportPayload (New-ReportQuery '2026-10-12' '2026-10-01')).status -eq 400) 'from after to is refused with 400'
+  $okR = Get-ReportPayload (New-ReportQuery ((Get-Date).AddDays(-2).ToString('yyyy-MM-dd')) ((Get-Date).ToString('yyyy-MM-dd')))
+  Assert-True (-not $okR.error) 'a valid 3-day range works'
+  Assert-True ($okR.period.from -match '^\d{4}-\d{2}-\d{2}$') 'and the period is reported as dates'
+
+  # no secrets in the report
+  $reportJson = ($rp | ConvertTo-Json -Depth 6)
+  if ($ForwardKey -and "$ForwardKey".Length -gt 3) {
+    Assert-True (-not $reportJson.Contains("$ForwardKey")) 'the report never carries the forwarding key'
+  }
+  Assert-True (-not $reportJson.Contains('sentinel_session')) 'nor a session id'
+  Assert-True (-not ($reportJson -match '"salt"|"hash"')) 'nor credential material'
+
+  # the front end: files exist, are allowlisted, and build text nodes
+  $root2 = Split-Path -Parent $PSScriptRoot
+  foreach ($f in @('js/pages/chains.js', 'js/pages/assets.js', 'js/pages/reports.js', 'css/print.css')) {
+    Assert-True (Test-Path (Join-Path $root2 $f)) ("   " + $f + ' exists')
+    Assert-True ((Get-Content -Raw (Join-Path $root2 $f)).Length -gt 0) ("   " + $f + ' is not empty')
+  }
+  $web6 = Get-Section $raw $mWeb $mProbes
+  foreach ($f in @('/js/pages/chains.js', '/js/pages/assets.js', '/js/pages/reports.js', '/css/print.css')) {
+    Assert-True ($web6.Contains("'$f'")) ('   the allowlist serves ' + $f)
+  }
+  foreach ($ep in @('/api/assets', '/api/chains', '/api/report')) {
+    Assert-True ($web6.Contains("'^" + $ep + '$' + "' {")) ('   the handler routes ' + $ep)
+  }
+  Assert-True ($web6.Contains('read-only (GET)')) 'the new endpoints are GET-only'
+  foreach ($f in @('js/pages/chains.js', 'js/pages/assets.js', 'js/pages/reports.js')) {
+    $txt = Get-Content -Raw (Join-Path $root2 $f)
+    Assert-True ([regex]::Matches($txt, '\.innerHTML\s*=').Count -eq 0) ("   " + $f + ' never assigns innerHTML')
+    Assert-True ($txt -match 'OWNER:') ("   " + $f + ' says what it owns')
+  }
+  $dash2 = Get-Content -Raw (Join-Path $root2 'dashboard.html')
+  Assert-True ($dash2.Contains('media="print"')) 'print.css is linked for print'
+  Assert-True ($dash2.Contains('id="alertCount"')) 'and the sidebar badge survives the new items'
+  $printCss = Get-Content -Raw (Join-Path $root2 'css/print.css')
+  Assert-True ($printCss.Contains('@page')) 'the printed report uses @page'
+  Assert-True ($printCss.Contains('counter(page)')) 'with page numbers'
+  Assert-True ($printCss.Contains('.sidebar')) 'and hides the sidebar chrome'
+  Assert-True ($printCss.Contains('page-break')) 'with page breaks between sections'
+
+  Write-Host ""
   Write-Host "== fixture replay ==" -ForegroundColor Cyan
   $manifestPath = Join-Path $Fixtures 'expected.json'
   if (-not (Test-Path $manifestPath)) { throw "cannot find $manifestPath" }

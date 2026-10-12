@@ -73,3 +73,7 @@
 table.data th.sortable { cursor: pointer; user-select: none; }
 table.data th.sortable:hover { color: var(--text); }
 
+/* report: labelled finding groups + a readable print/on-screen hierarchy */
+.report-findings { display: flex; flex-direction: column; gap: 4px; }
+.report-sub { margin: 8px 0 2px; font-size: var(--fs-cap); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-mute); }
+.report-findings table.data { margin-bottom: 4px; }

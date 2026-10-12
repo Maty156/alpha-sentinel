@@ -1,4 +1,4 @@
-﻿# ALPHA Sentinel v2.2 - AD / Network Attack Monitor (background service + web dashboard)
+# ALPHA Sentinel v2.2 - AD / Network Attack Monitor (background service + web dashboard)
 
 A standalone Windows security-monitoring tool from the **Alpha Cybersecurity**
 graduation project - **Wazuh's agent + dashboard model as ONE zero-dependency
@@ -251,7 +251,7 @@ healthy/coverage is teal. Base text 15px, tables 14px, tile numbers 30px, captio
 never below 12px; keyboard focus is visible and `prefers-reduced-motion` is
 respected.
 
-Five pages, one file each (see `js/pages/`):
+Eight pages, one file each (see `js/pages/`):
 
 - **Overview** - five stat tiles with delta arrows and sparklines (open alerts,
   critical, high, hosts seen, detection coverage), an alerts-by-severity bar, a
@@ -265,6 +265,28 @@ Five pages, one file each (see `js/pages/`):
   Resolved / False Positive), a **separate** acknowledge toggle, the contributing
   events and a kill-chain timeline of the other alerts for the same host or account,
   in time order, tagged with their tactic.
+- **Attack Chains** - open alerts grouped into kill chains by shared entity (same
+  account OR host OR source IP) inside a 60-minute sliding window. The list is on
+  the left (severity, title, alert count, time span); the selected chain is drawn
+  as an 11-step MITRE kill-chain strip with the alerts listed under each tactic
+  they touched, and every alert opens on the Alerts page. A chain needs at least
+  two alerts - a lone alert is not a chain.
+- **Assets** - three tabs (Hosts / Accounts / IPs) over what the window has seen:
+  hosts with their users, source addresses, event and alert counts and top
+  severity; accounts (DN prefixes stripped, user vs computer only - the type is
+  never guessed) with the flags their fired rules justify; source addresses with
+  the accounts and hosts behind them, a failed-logon count and an
+  internal/external flag (`::ffff:` normalised, RFC1918 / loopback / link-local =
+  internal). Search, sortable columns, and a drawer with the entity's open alerts
+  and its timeline from the event ring buffer. Counts come from observed events
+  and fired rules only - no risk scores are invented.
+- **Reports** - pick a period (or a preset) and get a self-contained engagement
+  report: executive summary, coverage and limitations (including how many
+  families are unverified or blind), findings by severity / status / tactic,
+  attack chains, affected assets, the top alerts, a remediation checklist and an
+  alert-timeline appendix. It is a framed document with `css/print.css` for
+  printing to PDF, and it says so plainly when the period is empty. Dates are
+  validated (junk is refused, ranges over 31 days are refused).
 - **Detection Rules** - all 28 families with their audit-policy state: Working,
   amber **Unverified** when the policy could not be read (that is not working, and
   it is counted separately in the header), or BLIND with the reason and the exact
@@ -275,14 +297,17 @@ Five pages, one file each (see `js/pages/`):
   forwarding on/off and destination host, the audit preflight and the account names
   with creation dates. No secret is ever rendered.
 
-Assets, Attack Paths and Reports are rendered as disabled "Soon" items: no routes, no
-pages. The top search box filters the table on the current page only, and the range
-selector is fixed at 24 hours - neither invents an endpoint. The header carries the
-health pill (green ok / amber catching up / red blind, from `/api/overview.health`),
-the open-alert count on the sidebar badge, and "DEMO DATA" **only** when the monitor
-was started with `-DemoData`.
+**Attack Paths** is the one remaining disabled "Soon" item: no route, no page. The top
+search box filters the table on the current page only, and the range selector is fixed
+at 24 hours - neither invents an endpoint. The header carries the health pill, which
+says **why** rather than just that something is off: **Blind** (red) when a rule family
+cannot fire, **Unverified** (amber) when the audit policy is unreadable, **Catching up**
+(amber) only when the poller is actually behind, **Healthy** (green) otherwise - the
+worst state is the headline and the tooltip lists every reason from
+`/api/overview.health.reasons[]`. The sidebar badge carries the open-alert count, and
+"DEMO DATA" appears **only** when the monitor was started with `-DemoData`.
 
-The front end is split so a bug is easy to place: `css/tokens|base|layout|components|pages|login.css`,
+The front end is split so a bug is easy to place: `css/tokens|base|layout|components|pages|login|print.css`,
 `js/api.js` (the only caller of the API), `js/state.js` (store + polling that pauses
 while the tab is hidden), `js/ui.js` (DOM helpers, formatting, badges, inline-SVG
 sparkline, toasts), `js/router.js` (the `#/overview`-style hash router),
@@ -344,7 +369,7 @@ event log, no HTTP and no network needed - by a runner that drives the same
 functions the live monitor uses:
 
 ```powershell
-.\tests\run-tests.ps1      # 599 assertions, exit code 1 on any failure
+.\tests\run-tests.ps1      # 757 assertions, exit code 1 on any failure
 ```
 
 It covers detection behaviour in both directions, dedupe-per-entity, the
@@ -367,8 +392,14 @@ and its secret-free guarantee, host/user/ip collection and caps, hourly buckets 
 their 24-hour window, the MITRE parsing, the alert object and the dedupe
 contribution, and all four payloads with their limits, filters and validation; and
 the new front end: the file layout, the allowlist, no inline code, no innerHTML, the
-design tokens, and every mockup-vs-spec rule), then replays all 19 fixtures in
-`tests/fixtures/`. See `tests/README.md`.
+design tokens, and every mockup-vs-spec rule), the v2.3.1 review round (coverage
+counting only confirmed families, empty arrays really empty, the tactic list and the
+health pill) and the v2.4 round (the health reasons and the aborted-fetch silence; the
+assets maps and their caps and eviction, DN stripping, `::ffff:` normalisation, the
+internal flag, and every assets/sort/filter/paging boundary; the chain grouping, its
+hash id and kill-chain ordering; and the report's period validation, its sections and
+its secret-free guarantee), then replays all 19 fixtures in `tests/fixtures/`. See
+`tests/README.md`.
 
 ## Forwarding to the web platform
 

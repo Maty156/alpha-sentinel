@@ -1,0 +1,53 @@
+/* print.css - OWNER: the printed report. White background, black text, severity
+   as text + border (never colour alone), page breaks between sections, a running
+   header, page numbers, and no chrome (sidebar, topbar, buttons hidden). */
+@media print {
+  body { background: #fff !important; color: #000 !important; font-size: 11pt; }
+  .sidebar, .topbar, .no-print, .toasts, #assetDrawer, #drawer, .backdrop { display: none !important; }
+  .app { display: block !important; }
+  .view { padding: 0 !important; }
+
+  /* running header + page numbers */
+  @page {
+    size: A4;
+    margin: 18mm 15mm;
+    @top-center { content: "ALPHA Sentinel - Engagement Report"; font-size: 9pt; color: #444; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 9pt; color: #444; }
+  }
+
+  .report-doc { color: #000; }
+  .report-header { border-bottom: 2px solid #000; padding-bottom: 6mm; margin-bottom: 6mm; }
+  .report-header h1 { color: #000; font-size: 18pt; }
+  .report-meta { color: #333; font-size: 9pt; margin-top: 2mm; }
+  .report-section { page-break-inside: avoid; page-break-after: always; }
+  .report-section:last-child { page-break-after: auto; }
+  .report-section h2 { font-size: 13pt; border-bottom: 1px solid #999; padding-bottom: 2mm; }
+  .report-exec { font-size: 11pt; }
+  .report-limitations { color: #333; font-size: 9.5pt; }
+
+  table.data { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+  table.data th { text-align: left; border-bottom: 1.5px solid #000; padding: 2mm 2mm; color: #000; }
+  table.data td { border-bottom: 0.5pt solid #bbb; padding: 1.6mm 2mm; color: #000; }
+  table.data tr { page-break-inside: avoid; }
+
+  /* severity readable without colour */
+  .sev { color: #000 !important; font-weight: 600; }
+  .sev::before { content: ""; display: inline-block; width: 3mm; height: 3mm; margin-right: 2mm; border: 1.2pt solid #000; background: #fff; }
+  .sev-Critical::before { border-style: double; border-width: 3pt; }
+  .sev-High::before { background: #000; }
+  .sev-Medium::before { border-radius: 50%; }
+  .sev-Low::before { border-radius: 50%; border-style: dotted; }
+  .badge { border: 1pt solid #000; color: #000 !important; }
+
+  .timeline { padding-left: 5mm; border-left: 1px solid #000; }
+  .t-time, .t-tactic { color: #333; }
+}
+/* the on-screen report view shares the print typography, but stays dark-friendly */
+.report-doc { max-width: 860px; margin: 0 auto; }
+.report-header { border-bottom: 1px solid var(--line); padding-bottom: var(--s-3); margin-bottom: var(--s-3); }
+.report-header h1 { color: var(--text); }
+.report-meta { color: var(--text-mute); font-size: var(--fs-cap); margin-top: 4px; }
+.report-section { margin-bottom: var(--s-5); }
+.report-section h2 { margin-bottom: var(--s-2); color: var(--text); }
+.report-limitations { color: var(--text-dim); }
+.report-exec { color: var(--text); }

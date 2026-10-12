@@ -12,6 +12,7 @@
     '/assets': 'assets',
     '/rules': 'rules',
     '/events': 'events',
+    '/reports': 'reports',
     '/settings': 'settings'
   };
   var current = null;

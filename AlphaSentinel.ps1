@@ -1766,6 +1766,102 @@ function Get-AttackChains {
 
 
 
+# ============================================================
+# REPORT - the engagement report (printable HTML reads it)
+# ============================================================
+function Get-ReportPayload($query) {
+  # ISO dates, validated: a report is a statement about a period, so junk dates
+  # must not silently become "everything"
+  $defTo = (Get-Date).ToUniversalTime()
+  $defFrom = $defTo.AddDays(-1)
+  $fromText = Get-QueryValue $query 'from'
+  $toText = Get-QueryValue $query 'to'
+  $from = $defFrom; $to = $defTo
+  if ($fromText) { try { $from = ([datetime]::Parse($fromText)).ToUniversalTime() } catch { return [PSCustomObject]@{ error = 'from must be an ISO date (YYYY-MM-DD).'; status = 400 } } }
+  if ($toText) { try { $to = ([datetime]::Parse($toText)).ToUniversalTime().AddDays(1).AddSeconds(-1) } catch { return [PSCustomObject]@{ error = 'to must be an ISO date (YYYY-MM-DD).'; status = 400 } } }
+  if ($from -gt $to) { return [PSCustomObject]@{ error = 'from must not be after to.'; status = 400 } }
+  if (($to - $from).TotalDays -gt 31) { return [PSCustomObject]@{ error = 'The report period is capped at 31 days.'; status = 400 } }
+
+  $inPeriod = @([object[]]$Script:Alerts | Where-Object {
+    if ($_.SelfTest) { return $false }
+    $t = $null
+    try { $t = [datetime]::Parse("$($_.Time)").ToUniversalTime() } catch { return $false }
+    return ($t -ge $from -and $t -le $to)
+  })
+
+  $bySeverity = @{}; $byStatus = @{}; $byTactic = @{}
+  foreach ($a in $inPeriod) {
+    $sv = "$($a.Severity)"; $st = if ($a.Status) { "$($a.Status)" } else { 'New' }
+    $tc = if ($a.Tactic) { "$($a.Tactic)" } else { Get-MitreTactic "$($a.Category)" }
+    if (-not $bySeverity.ContainsKey($sv)) { $bySeverity[$sv] = 0 }
+    $bySeverity[$sv] = [int]$bySeverity[$sv] + 1
+    if (-not $byStatus.ContainsKey($st)) { $byStatus[$st] = 0 }
+    $byStatus[$st] = [int]$byStatus[$st] + 1
+    if (-not $byTactic.ContainsKey($tc)) { $byTactic[$tc] = 0 }
+    $byTactic[$tc] = [int]$byTactic[$tc] + 1
+  }
+  $hostsSeen = @($inPeriod | ForEach-Object { "$($_.Host)" } | Where-Object { $_ } | Select-Object -Unique)
+  $acctsSeen = @($inPeriod | ForEach-Object { ConvertTo-AccountName "$($_.Account)" } | Where-Object { $_ } | Select-Object -Unique)
+  $ipsSeen = @($inPeriod | ForEach-Object { Get-NormalisedIp "$($_.SourceIp)" } | Where-Object { $_ } | Select-Object -Unique)
+
+  $top = @($inPeriod | Sort-Object -Property @{ e = { $SevScore["$($_.Severity)"] } }, @{ e = { "$($_.Time)" } } | Select-Object -First 15)
+  $timeline = @($inPeriod | Sort-Object -Property @{ e = { "$($_.Time)" } } | Select-Object -First 50)
+
+  $cov = (Get-OverviewPayload).coverage
+
+  # top assets by alert count, from the same map the Assets page reads
+  $map = Get-AssetMap
+  $assetRows = @()
+  $assetRows += @($map.hosts.Values | Sort-Object -Property @{ e = { [int]$_.alertCount } } -Descending | Select-Object -First 10)
+  $assetRows += @($map.accounts.Values | Sort-Object -Property @{ e = { [int]$_.alertCount } } -Descending | Select-Object -First 10)
+  $assetRows = @($assetRows | Where-Object { [int]$_.alertCount -gt 0 } | Sort-Object -Property @{ e = { [int]$_.alertCount } } -Descending | Select-Object -First 10)
+
+  # remediation: the rule catalogue's own text, deduped, with a count
+  $rem = @{}
+  foreach ($a in $inPeriod) {
+    $rk = "$($a.RuleKey)"
+    $text = "$($a.Remediation)"
+    if ((-not $text -or $text -eq '') -and $RuleMeta[$rk]) { $text = "$($RuleMeta[$rk].Remediation)" }
+    if (-not $text -or $text -eq '') { continue }
+    if (-not $rem.ContainsKey($text)) { $rem[$text] = @{ rule = $rk; count = 0 } }
+    $rem[$text].count = [int]$rem[$text].count + 1
+  }
+  $remediation = @($rem.Keys | ForEach-Object {
+    [PSCustomObject]@{ rule = $rem[$_].rule; recommendation = $_; count = [int]$rem[$_].count }
+  } | Sort-Object -Property count -Descending)
+
+  return [PSCustomObject]@{
+    generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+    generatedBy = "$Script:ReportUser"
+    period = [PSCustomObject]@{
+      from = $from.ToUniversalTime().ToString('yyyy-MM-dd')
+      to = $to.ToUniversalTime().ToString('yyyy-MM-dd')
+    }
+    summary = [PSCustomObject]@{
+      bySeverity = $bySeverity
+      byStatus = $byStatus
+      byTactic = $byTactic
+      hosts = $hostsSeen.Count
+      accounts = $acctsSeen.Count
+      ips = $ipsSeen.Count
+      eventsSeen = $Script:ObsEvents.Count
+    }
+    coverage = [PSCustomObject]@{
+      percent = $cov.percent; working = $cov.rulesWorking
+      blind = $cov.rulesBlind; unverified = $cov.rulesUnknown
+      unverifiedList = @($cov.unknownRules)
+    }
+    topAlerts = @($top | Select-Object Id, Time, RuleKey, Severity, Title, MitreId, Tactic, Host, Account, Status)
+    chains = @(Get-AttackChains)
+    assets = $assetRows
+    timeline = @($timeline | Select-Object Id, Time, Severity, Title, Host, Account, Status)
+    remediation = $remediation
+    notes = 'Event data is in-memory since process start; see limitations. Alert ack/triage state survives in sentinel-history.csv.'
+    demoData = [bool]$Script:DemoData
+  }
+}
+
+
 # ---- request body limits (web DoS guard) ----------------------------------
 # A POST body is attacker-controlled and this server is SINGLE-THREADED, so an
 # unbounded read is a denial of service: one client can hold the only thread
@@ -3308,6 +3404,8 @@ $Script:StaticFiles = @{
   '/js/pages/settings.js' = @{ file = 'js/pages/settings.js'; type = 'application/javascript; charset=utf-8' }
   '/js/pages/chains.js'   = @{ file = 'js/pages/chains.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/assets.js'   = @{ file = 'js/pages/assets.js';   type = 'application/javascript; charset=utf-8' }
+  '/js/pages/reports.js'  = @{ file = 'js/pages/reports.js';  type = 'application/javascript; charset=utf-8' }
+  '/css/print.css'        = @{ file = 'css/print.css';        type = 'text/css; charset=utf-8' }
 }
 
 
@@ -3382,6 +3480,8 @@ function Invoke-Handler($ctx) {
   # afterwards filed the attack under "unknown" and left the real source
   # unblocked and unlogged.
   $clientIp = Get-ClientAddress $ctx
+  $Script:ReportUser = ''
+  if (Test-Authenticated $ctx) { $Script:ReportUser = Get-SessionUser $ctx }
   try {
     # ---- DNS-rebinding guard: on a loopback bind only loopback Host names
     $allowed = Test-HostAllowed $ctx
@@ -3603,6 +3703,12 @@ function Invoke-Handler($ctx) {
         if ($detail.error) { Send-Json $res ('{"error":"' + $detail.error + '"}') $detail.status; return }
         Send-Json $res (('{"asset":' + ($detail.asset | ConvertTo-Json -Depth 6) +
                          ',"timeline":' + (ConvertTo-JsonArray $detail.timeline) + '}'))
+      }
+      '^/api/report$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        $rp = Get-ReportPayload $ctx.Request.QueryString
+        if ($rp.error) { Send-Json $res ('{"error":"' + $rp.error + '"}') $rp.status; return }
+        Send-Json $res ($rp | ConvertTo-Json -Depth 6)
       }
       '^/api/chains$' {
         if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
