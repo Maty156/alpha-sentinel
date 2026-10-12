@@ -5,15 +5,27 @@
   var S = window.Sentinel = window.Sentinel || {};
   var POLL_MS = 10000;
 
-  function healthPill(health, overview) {
+  /* The label says WHY: Blind (red) when families cannot fire, Unverified
+     (amber) when the audit policy is unreadable, Catching up (amber) only when
+     the poller is behind, Healthy (green) otherwise. Every reason that applies
+     lands in the tooltip, worst first - the server orders them. */
+  function healthPill(health) {
     var host = document.getElementById('healthPill');
     if (!host) { return; }
     S.ui.clear(host);
-    var kind = 'pill-ok', label = 'Healthy', title = 'polling normally';
-    if (health === 'blind') { kind = 'pill-bad'; label = 'Blind rules'; title = 'a rule family is not being audited, so it cannot fire'; }
-    else if (health === 'degraded') { kind = 'pill-warn'; label = 'Catching up'; title = 'the poller is behind or has skipped events'; }
-    if (overview && overview.lastPoll) {
-      title += ' - ' + (overview.lastPoll.lagSeconds || 0) + 's behind the oldest channel';
+    var state = health && health.state ? health.state : 'ok';
+    var reasons = (health && health.reasons) || [];
+    var labels = [];
+    reasons.forEach(function (r) { if (r && r.label) { labels.push(r.label + ' - ' + (r.detail || '')); } });
+    var kind = 'pill-ok', label = 'Healthy', title = labels.length ? labels.join('; ') : 'polling normally';
+    if (state === 'blind') {
+      kind = 'pill-bad'; label = 'Blind';
+    } else if (state === 'degraded') {
+      kind = 'pill-warn';
+      var codes = reasons.map(function (r) { return r.code; });
+      if (codes.indexOf('unverified') >= 0) { label = 'Unverified'; }
+      else if (codes.indexOf('catching-up') >= 0 || codes.indexOf('lag') >= 0) { label = 'Catching up'; }
+      else { label = 'Degraded'; }
     }
     host.appendChild(S.ui.pill(kind, label, title));
   }
@@ -45,7 +57,7 @@
   function refreshOverview() {
     return S.api.get('/api/overview', 'overview').then(function (ov) {
       S.state.set('overview', ov);
-      healthPill(ov.health, ov);
+      healthPill(ov.health);
       navBadge(ov);
       demoPill(ov);
       return ov;

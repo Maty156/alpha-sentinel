@@ -40,6 +40,10 @@
         return data;
       });
     }, function (err) {
+      // a fetch the page itself aborted (navigation, tab close, an abort
+      // controller) is not a failure: it must stay silent, or every link clicked
+      // away from a mid-flight poll prints an error for a request nobody wanted
+      if (err && (err.name === 'AbortError' || err.name === 'NavigationError')) { return Promise.reject(err); }
       logFail(page, err);
       return Promise.reject(err);
     });

@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-# ALPHA SENTINEL v2.3.1 - AD / Network Attack Monitor (background service + web UI)
+# ALPHA SENTINEL v2.4.0 - AD / Network Attack Monitor (background service + web UI)
 # ============================================================================
 # A standalone Windows security monitor from the ALPHA Cybersecurity project.
 # Like Wazuh's agent+dashboard model, but as ONE script with zero dependencies:
@@ -1132,9 +1132,34 @@ function Get-OverviewPayload {
   $catch = Get-CatchUpState $Script:LagSeconds
   $blindCount = $blind.Count
   $unknownCount = $unknown.Count
-  $health = 'ok'
-  if ($blindCount -gt 0) { $health = 'blind' }
-  elseif ($unknownCount -gt 0 -or $catch.catchingUp -or $Script:EvalErrors -gt 0 -or $Script:LagSeconds -gt 120) { $health = 'degraded' }
+  $healthState = 'ok'
+  if ($blindCount -gt 0) { $healthState = 'blind' }
+  elseif ($unknownCount -gt 0 -or $catch.catchingUp -or $Script:EvalErrors -gt 0 -or $Script:LagSeconds -gt 120) { $healthState = 'degraded' }
+  # EVERY reason that applies, worst first - the pill shows the worst and puts
+  # all of them in its tooltip, so an amber pill always says why
+  $reasons = @()
+  if ($blindCount -gt 0) {
+    $noun = if ($blindCount -eq 1) { 'family' } else { 'families' }
+    $reasons += [PSCustomObject]@{ code = 'blind'; label = 'Blind rules'
+      detail = "$blindCount rule $noun cannot fire - Windows is not writing their events" }
+  }
+  if ($unknownCount -gt 0) {
+    $noun = if ($unknownCount -eq 1) { 'family is' } else { 'families are' }
+    $reasons += [PSCustomObject]@{ code = 'unverified'; label = 'Unverified'
+      detail = "the audit policy could not be read, so $unknownCount rule $noun unverified" }
+  }
+  if ($catch.catchingUp) {
+    $reasons += [PSCustomObject]@{ code = 'catching-up'; label = 'Catching up'
+      detail = "the poller is $Script:LagSeconds s behind the oldest channel" }
+  }
+  if ($Script:LagSeconds -gt 120) {
+    $reasons += [PSCustomObject]@{ code = 'lag'; label = 'Poll lag'
+      detail = "$Script:LagSeconds s behind the newest events" }
+  }
+  if ($Script:EvalErrors -gt 0) {
+    $reasons += [PSCustomObject]@{ code = 'eval-errors'; label = 'Skipped events'
+      detail = "$Script:EvalErrors event(s) failed to evaluate and were skipped" }
+  }
 
   return [PSCustomObject]@{
     tiles = [PSCustomObject]@{
@@ -1158,7 +1183,7 @@ function Get-OverviewPayload {
     tacticCounts   = $tacticCounts
     hourly         = $hourly
     lastPoll = [PSCustomObject]@{ lagSeconds = [int]$Script:LagSeconds; catchingUp = $catch.catchingUp; capped = $catch.capped }
-    health  = $health
+    health  = [PSCustomObject]@{ state = $healthState; reasons = $reasons }
     version = $Script:SentinelVersion
     demoData = [bool]$Script:DemoData
   }
@@ -1400,7 +1425,7 @@ $Script:MaxBodyStalls = 3       # stalls from one address before it is blocked
 $Script:BodyStalls = @{}        # ip -> stalls seen (in-memory, per process)
 
 # ---- ALPHA SENTINEL version ------------------------------------------------
-$Script:SentinelVersion = '2.3.1'
+$Script:SentinelVersion = '2.4.0'
 # true only when the operator started the monitor with -DemoData: the dashboard
 # then labels itself as a demo instead of pretending the numbers are real
 $Script:DemoData = [bool]$DemoData
@@ -3872,7 +3897,7 @@ if ($usersState.ok) {
 
 Write-Host ""
 Write-Host "  ============================================================" -ForegroundColor Red
-Write-Host "   ALPHA SENTINEL v2.3.1 - AD / Network Attack Monitor" -ForegroundColor Red
+Write-Host "   ALPHA SENTINEL v2.4.0 - AD / Network Attack Monitor" -ForegroundColor Red
 Write-Host "  ============================================================" -ForegroundColor Red
 if ($listener) {
   if (-not $Bind -or $Bind -eq 'localhost' -or $Bind -eq '127.0.0.1') {

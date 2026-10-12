@@ -1242,7 +1242,8 @@ try {
   Assert-True ($ov.coverage.rulesWorking -eq ($ov.coverage.rulesTotal - $ov.coverage.rulesBlind - $ov.coverage.rulesUnknown)) 'working = total - blind - unverified'
   Assert-True ($ov.coverage.percent -eq [int][Math]::Round((100.0 * $ov.coverage.rulesWorking) / $ov.coverage.rulesTotal)) 'percent is confirmed-working over the total'
   Assert-True ($ov.coverage.unknownRules.Count -eq $ov.coverage.rulesUnknown) 'the unverified families are listed for the Rules page'
-  Assert-True ($ov.health -eq 'degraded') 'health is degraded (amber) while the audit policy cannot be read'
+  Assert-True ($ov.health.state -eq 'degraded') 'health is degraded (amber) while the audit policy cannot be read'
+  Assert-True (@($ov.health.reasons | Where-Object { $_.code -eq 'unverified' }).Count -eq 1) 'with the unverified reason attached'
   Assert-True ((Get-OverviewPayload).tiles.openAlerts -eq 0) 'an idle system has no open alerts'
 
   # every gated subcategory readable and on: coverage is confirmed at 100%.
@@ -1260,7 +1261,8 @@ try {
   $ovOk = Get-OverviewPayload
   Assert-True ($ovOk.coverage.rulesUnknown -eq 0) 'with the policy readable nothing is unverified'
   Assert-True ($ovOk.coverage.percent -eq 100) 'a readable, fully enabled policy confirms 100% coverage'
-  Assert-True ($ovOk.health -eq 'ok') 'and health is ok'
+  Assert-True ($ovOk.health.state -eq 'ok') 'and health is ok'
+  Assert-True (@($ovOk.health.reasons).Count -eq 0) 'with no reasons when nothing is wrong'
   $Script:LastPollCapped = $false
 
   # a blind family drops coverage and flips health to blind
@@ -1274,11 +1276,12 @@ try {
   Assert-True ($ovb.coverage.rulesWorking -eq ($ovb.coverage.rulesTotal - $ovb.coverage.rulesBlind)) 'working = total - blind'
   Assert-True ($ovb.coverage.blindRules.Count -ge 1) 'the blind rules are listed for the Rules page'
   Assert-True ("$($ovb.coverage.blindRules[0].reason)".Length -gt 0) 'each with the reason it cannot fire'
-  Assert-True ($ovb.health -eq 'blind') 'health reports blind when a family cannot fire'
+  Assert-True ($ovb.health.state -eq 'blind') 'health reports blind when a family cannot fire'
+  Assert-True (@($ovb.health.reasons).Count -ge 1 -and @($ovb.health.reasons)[0].code -eq 'blind') 'and the blind reason is listed first (worst first)'
   $Script:AuditState = New-ReadableAuditState
-  Assert-True ((Get-OverviewPayload).health -eq 'ok') 'and returns to ok when the policy reads clean'
+  Assert-True ((Get-OverviewPayload).health.state -eq 'ok') 'and returns to ok when the policy reads clean'
   $Script:AuditState = $null
-  Assert-True ((Get-OverviewPayload).health -eq 'degraded') 'unreadable again, it goes back to degraded rather than claiming health'
+  Assert-True ((Get-OverviewPayload).health.state -eq 'degraded') 'unreadable again, it goes back to degraded rather than claiming health'
 
   # --- /api/events --------------------------------------------------------
   Reset-Engine
@@ -1525,9 +1528,9 @@ try {
   Assert-True ($raw.Contains('if ($null -eq $i) { continue }')) 'and a null element is skipped rather than serialised'
 
   # --- 6. polish -----------------------------------------------------------
-  Assert-True ($Script:SentinelVersion -eq '2.3.1') 'the version is 2.3.1'
-  Assert-True ($raw.Contains('ALPHA SENTINEL v2.3.1')) 'the script header says v2.3.1'
-  Assert-True ($raw.Contains('ALPHA SENTINEL v2.3.1 - AD / Network Attack Monitor')) 'and so does the startup banner'
+  Assert-True ($Script:SentinelVersion -eq '2.4.0') 'the version is 2.4.0'
+  Assert-True ($raw.Contains('ALPHA SENTINEL v2.4.0')) 'the script header says v2.4.0'
+  Assert-True ($raw.Contains('ALPHA SENTINEL v2.4.0 - AD / Network Attack Monitor')) 'and so does the startup banner'
 
   # account names, not distinguished names
   Assert-True ((ConvertTo-AccountName 'CN=attacker,OU=Corp,DC=example,DC=local') -eq 'attacker') 'a DN is trimmed to the account'
@@ -1591,6 +1594,57 @@ try {
   Assert-True ($uiJs.Contains('values.length === 1')) 'and a single bucket still draws a line'
   Assert-True ($ovJs.Contains('slice(0, 6)')) 'Recent Alerts is capped at six rows'
   Assert-True (-not ($ovJs -match 'alertsTable[\s\S]{0,1200}a\.Description')) 'and no longer prints the description there'
+
+  Write-Host ""
+  Write-Host "== v2.4 part 0: the pill says why, aborts stay silent ==" -ForegroundColor Cyan
+
+  # --- health.reasons[] -----------------------------------------------------
+  Reset-Engine
+  $Script:AuditState = $null
+  $h = (Get-OverviewPayload).health
+  Assert-True ($h.state -eq 'degraded') 'an unreadable audit policy degrades health'
+  $codes = @($h.reasons | ForEach-Object { $_.code })
+  Assert-True ($codes -contains 'unverified') 'with the unverified reason'
+  Assert-True ("$(@($h.reasons | Where-Object { $_.code -eq 'unverified' })[0].label)" -eq 'Unverified') 'labelled Unverified'
+
+  # worst first: blind AND catching-up together -> blind headlines, both listed
+  Reset-Engine
+  $gated = @(Get-RuleCatalog | Where-Object { "$($_.auditSubcategory)" } | Select-Object -First 1)
+  $sub = ("$($gated[0].auditSubcategory)" -split ' \+ ')[0].ToLower()
+  $Script:AuditState = @{}
+  $Script:AuditState[$sub] = 'No Auditing'
+  $Script:LastPollCapped = $true
+  $h2 = (Get-OverviewPayload).health
+  Assert-True ($h2.state -eq 'blind') 'blind is the state when it and catching-up both apply'
+  Assert-True (@($h2.reasons)[0].code -eq 'blind') 'and blind is the first reason (the pill shows the worst)'
+  $codes2 = @($h2.reasons | ForEach-Object { $_.code })
+  Assert-True ($codes2 -contains 'catching-up') 'with the catching-up reason also listed'
+  Assert-True ($codes2.Count -ge 2) 'so the tooltip can list every reason'
+
+  # catching up alone, with a readable policy
+  Reset-Engine
+  $Script:AuditState = New-ReadableAuditState
+  $Script:LastPollCapped = $true
+  $h3 = (Get-OverviewPayload).health
+  Assert-True ($h3.state -eq 'degraded') 'a deferred poll degrades health on its own'
+  Assert-True (@($h3.reasons | Where-Object { $_.code -eq 'catching-up' }).Count -eq 1) 'with the catching-up reason'
+  Assert-True (@($h3.reasons | Where-Object { $_.code -eq 'unverified' }).Count -eq 0) 'and no unverified reason when the policy reads'
+  $Script:LastPollCapped = $false
+
+  # --- the pill renders the reason, not a generic word ----------------------
+  $appJs = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'js/app.js')
+  Assert-True ($appJs.Contains('health.state')) 'the pill reads health.state'
+  Assert-True ($appJs.Contains('reasons')) 'and health.reasons'
+  Assert-True ($appJs.Contains("label = 'Unverified'")) 'an unreadable policy shows Unverified, not a generic word'
+  Assert-True ($appJs.Contains("label = 'Catching up'")) 'a deferred poll shows Catching up'
+  Assert-True ($appJs.Contains("label = 'Blind'")) 'a blind policy shows Blind'
+  Assert-True ($appJs.Contains("labels.join('; ')")) 'and every reason lands in the tooltip'
+
+  # --- an aborted fetch stays silent ----------------------------------------
+  $apiJs = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'js/api.js')
+  Assert-True ($apiJs.Contains("err.name === 'AbortError'")) 'an aborted fetch is not logged'
+  Assert-True ($apiJs.Contains("err.name === 'NavigationError'")) 'nor a navigation-cancelled one'
+  Assert-True ($apiJs.Contains('logFail(page, err)')) 'real failures still log once, with the page name'
 
   Write-Host ""
   Write-Host "== fixture replay ==" -ForegroundColor Cyan
