@@ -8,6 +8,7 @@
   var ROUTES = {
     '/overview': 'overview',
     '/alerts': 'alerts',
+    '/chains': 'chains',
     '/assets': 'assets',
     '/rules': 'rules',
     '/events': 'events',

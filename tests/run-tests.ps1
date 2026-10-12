@@ -1731,6 +1731,63 @@ try {
   Assert-True (-not $serialisedAssets.Contains('S3CR3T')) 'no secret material reaches an asset payload'
 
   Write-Host ""
+  Write-Host "== v2.4 part 2: attack chains ==" -ForegroundColor Cyan
+  # the Attack Chains page is real from this part on
+  $dashC = Get-RepoText 'dashboard.html'
+  Assert-True ($dashC -match '<a class="nav-item" href="#/chains" data-page="chains">') 'Attack Chains is a live nav link'
+  Assert-True ((Get-RepoText 'js/router.js').Contains("'/chains': 'chains'")) '#/chains is routed'
+  Assert-True ($dashC.Contains('/js/pages/chains.js')) 'and the page module is loaded by the shell'
+
+  Reset-Engine
+  $now = (Get-Date).ToUniversalTime()
+  # NOTE: $host is a PowerShell automatic (read-only) variable - the host field
+  # must be a different name
+  function Seed-Alert([int]$Id, [string]$ruleKey, [string]$sev, [string]$account, [string]$hostName, [string]$ip, [datetime]$when, [string]$status = 'New') {
+    $meta = $RuleMeta[$ruleKey]
+    $a = [PSCustomObject]@{
+      Id = $Id; Time = $when.ToString('o'); RuleKey = $ruleKey; Rule = $meta.EventId; Severity = $sev
+      Title = $meta.Title; Mitre = $meta.Mitre; MitreId = (Get-MitreParts "$($meta.Mitre)").id
+      MitreName = (Get-MitreParts "$($meta.Mitre)").name; Tactic = (Get-MitreTactic "$($meta.Category)")
+      Entity = $account; Remediation = 'x'; Description = 'x'
+      Host = $hostName; Account = $account; SourceIp = $ip; EventId = "$($meta.EventId)"
+      Acknowledged = $false; Status = $status; Notes = ''; SelfTest = $false
+      FirstSeen = $when.ToString('o'); LastSeen = $when.ToString('o'); Count = 1; Events = @()
+    }
+    $Script:Alerts.Add($a)
+    return $a
+  }
+  # one chain: same account within the window
+  Seed-Alert 10 'brute_force_single_account' 'High' 'attacker' 'DC01' '10.0.0.7' $now
+  Seed-Alert 11 'privilege_escalation' 'Critical' 'attacker' 'DC01' '10.0.0.7' $now.AddMinutes(5)
+  # a third, joined by HOST even though the account differs
+  Seed-Alert 12 'log_tampering' 'Critical' 'administrator' 'DC01' '10.0.0.9' $now.AddMinutes(8)
+  # outside the window -> its own chain (but alone, so excluded)
+  Seed-Alert 13 'kerberoasting' 'High' 'svc-sql' 'DC02' '10.0.0.8' $now.AddMinutes(200)
+  # a resolved alert must never join a chain
+  Seed-Alert 14 'account_created' 'Low' 'attacker' 'DC01' '10.0.0.7' $now.AddMinutes(9) 'Resolved'
+
+  $chains = Get-AttackChains
+  Assert-True ($chains.Count -eq 1) ('exactly one chain forms (got ' + $chains.Count + ')')
+  $c = $chains[0]
+  Assert-True ($c.alerts.Count -eq 3) 'the three in-window alerts are in it'
+  Assert-True (@($c.alerts | Where-Object { $_.id -eq 14 }).Count -eq 0) 'a Resolved alert is excluded'
+  Assert-True (@($c.alerts | Where-Object { $_.id -eq 13 }).Count -eq 0) 'an alert outside the 60-minute window is excluded'
+  Assert-True (@($c.entities.accounts) -contains 'attacker' -and @($c.entities.hosts) -contains 'DC01') 'its entities are the shared account and host'
+  Assert-True ($c.maxSeverity -eq 'Critical') 'the chain severity is the worst of its alerts'
+  Assert-True ("$($c.id)" -match '^[0-9a-f]{12}$') 'the chain id is a stable short hash'
+  Assert-True ((Get-AttackChains)[0].id -eq $c.id) 'and identical alerts produce an identical id (deterministic)'
+  # kill-chain ordering: Persistence before Credential Access, Privilege Escalation before Defense Evasion
+  $order = @($c.tacticsInOrder)
+  Assert-True ($order.Count -ge 3) 'the tactics are listed in kill-chain order'
+  Assert-True ($order.IndexOf('Persistence') -lt $order.IndexOf('Credential Access')) 'Persistence precedes Credential Access'
+  Assert-True ($order.IndexOf('Privilege Escalation') -lt $order.IndexOf('Defense Evasion')) 'Privilege Escalation precedes Defense Evasion'
+  Assert-True ($order.IndexOf('Defense Evasion') -lt $order.IndexOf('Credential Access')) 'Defense Evasion precedes Credential Access'
+  # a single alert stays out even when nothing else exists
+  Reset-Engine
+  Seed-Alert 20 'log_tampering' 'Critical' 'administrator' 'DC01' '' $now
+  Assert-True ((Get-AttackChains).Count -eq 0) 'a single open alert forms no chain'
+
+  Write-Host ""
   Write-Host "== fixture replay ==" -ForegroundColor Cyan
   $manifestPath = Join-Path $Fixtures 'expected.json'
   if (-not (Test-Path $manifestPath)) { throw "cannot find $manifestPath" }

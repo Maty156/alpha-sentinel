@@ -40,6 +40,35 @@
 /* settings */
 .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: var(--s-3); align-items: start; }
 
+/* attack chains - the left list and the 11-step kill-chain strip */
+.chains-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: var(--s-3); align-items: start; }
+.chains-list { display: flex; flex-direction: column; gap: 6px; }
+.chains-item {
+  text-align: left; width: 100%; background: var(--bg-1); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 10px 12px; cursor: pointer; color: var(--text);
+}
+.chains-item:hover { border-color: var(--line-2); }
+.chains-item.on { border-color: var(--brand); background: var(--brand-soft); }
+.chain-strip { display: grid; grid-template-columns: repeat(11, minmax(0, 1fr)); gap: 5px; }
+.chain-cell {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 7px 6px; min-height: 150px;
+}
+.chain-cell.lit { border-color: var(--brand); background: var(--brand-soft); }
+.chain-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); margin-bottom: 6px; }
+.chain-cell.lit .chain-dot { background: var(--brand); }
+.chain-name { font-size: 10.5px; line-height: 1.2; min-height: 26px; color: var(--text-mute); }
+.chain-cell.lit .chain-name { color: var(--text); }
+.chain-alerts { list-style: none; margin: 5px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.chain-alerts li { font-size: 10.5px; line-height: 1.25; overflow-wrap: anywhere; word-break: break-word; }
+.chain-alerts a { display: block; text-decoration: none; }
+.chain-alerts a:hover { text-decoration: underline; }
+@media (max-width: 1400px) {
+  .chains-layout { grid-template-columns: 1fr; }
+  .chain-strip { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) { .chain-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
 /* sortable table headers */
 table.data th.sortable { cursor: pointer; user-select: none; }
 table.data th.sortable:hover { color: var(--text); }

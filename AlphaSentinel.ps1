@@ -1648,6 +1648,124 @@ function Get-AssetDetail($kind, $id) {
 
 
 
+# ============================================================
+# ATTACK CHAINS - open alerts that share an entity in time
+# ============================================================
+# Alerts the analyst resolved (or marked false positive) are EXCLUDED - a chain
+# is a live investigation. Alerts are grouped when they share an account OR a
+# host OR a source ip inside a 60-minute sliding window; a chain needs at least
+# two alerts, so single alerts stay out. Deterministic: the same set of alerts
+# always produces the same chains and the same ids.
+$Script:ChainWindowMinutes = 60
+$Script:ChainTactics = @('Initial Access', 'Execution', 'Persistence', 'Privilege Escalation',
+  'Defense Evasion', 'Credential Access', 'Discovery', 'Lateral Movement',
+  'Collection', 'Exfiltration', 'Impact')
+$Script:MaxChains = 50
+
+function Get-ChainId([string]$key) {
+  # stable, short, and derived only from the alert ids in the chain
+  $md5 = [System.Security.Cryptography.MD5]::Create()
+  try {
+    $bytes = $md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))
+    return (($bytes | Select-Object -First 6 | ForEach-Object { $_.ToString('x2') }) -join '')
+  } finally { $md5.Dispose() }
+}
+
+function Get-AttackChains {
+  $open = @($Script:Alerts | Where-Object {
+    -not $_.SelfTest -and "$($_.Status)" -ne 'Resolved' -and "$($_.Status)" -ne 'False Positive'
+  })
+  $parsed = @()
+  foreach ($a in $open) {
+    $when = $null
+    try { $when = [datetime]::Parse("$($a.Time)").ToUniversalTime() } catch { $when = $null }
+    if (-not $when) { continue }
+    $parsed += [PSCustomObject]@{
+      Alert = $a; When = $when
+      Account = ConvertTo-AccountName "$($a.Account)"
+      Host = "$($a.Host)"
+      Ip = Get-NormalisedIp "$($a.SourceIp)"
+      Tactic = if ($a.Tactic) { "$($a.Tactic)" } else { Get-MitreTactic "$($a.Category)" }
+    }
+  }
+  # union-find over shared entities within the window
+  $parent = @{}
+  foreach ($i in @(0..($parsed.Count - 1))) { $parent[$i] = $i }
+  function Find-Root([int]$x) {
+    while ($parent[$x] -ne $x) { $parent[$x] = $parent[$parent[$x]]; $x = $parent[$x] }
+    return $x
+  }
+  function Join-Sets([int]$a, [int]$b) {
+    $ra = Find-Root $a; $rb = Find-Root $b
+    if ($ra -ne $rb) { $parent[$rb] = $ra }
+  }
+  $window = [timespan]::FromMinutes($Script:ChainWindowMinutes)
+  for ($i = 0; $i -lt $parsed.Count; $i++) {
+    for ($j = $i + 1; $j -lt $parsed.Count; $j++) {
+      $gap = [Math]::Abs(($parsed[$i].When - $parsed[$j].When).TotalMinutes)
+      if ($gap -gt $Script:ChainWindowMinutes) { continue }
+      if ($parsed[$i].Account -and $parsed[$i].Account -eq $parsed[$j].Account) { Join-Sets $i $j; continue }
+      if ($parsed[$i].Host -and $parsed[$i].Host -eq $parsed[$j].Host) { Join-Sets $i $j; continue }
+      if ($parsed[$i].Ip -and $parsed[$i].Ip -eq $parsed[$j].Ip) { Join-Sets $i $j }
+    }
+  }
+  $groups = @{}
+  for ($i = 0; $i -lt $parsed.Count; $i++) {
+    $root = Find-Root $i
+    if (-not $groups.ContainsKey($root)) { $groups[$root] = @() }
+    $groups[$root] += $parsed[$i]
+  }
+  $chains = @()
+  foreach ($root in $groups.Keys) {
+    $members = @($groups[$root] | Sort-Object When)
+    if ($members.Count -lt 2) { continue }   # a chain needs at least two alerts
+    $accounts = @($members | ForEach-Object { $_.Account } | Where-Object { $_ } | Select-Object -Unique)
+    $hosts = @($members | ForEach-Object { $_.Host } | Where-Object { $_ } | Select-Object -Unique)
+    $ips = @($members | ForEach-Object { $_.Ip } | Where-Object { $_ } | Select-Object -Unique)
+    $sev = ''
+    foreach ($m in $members) { $sev = Get-MaxSeverity $sev "$($m.Alert.Severity)" }
+    $ids = @($members | ForEach-Object { [int]$_.Alert.Id } | Sort-Object)
+    $key = ($ids -join '-')
+    $tacticIndexes = @{}
+    foreach ($t in @($members | ForEach-Object { $_.Tactic } | Where-Object { $_ } | Select-Object -Unique)) {
+      $idx = $Script:ChainTactics.IndexOf($t)
+      if ($idx -ge 0) { $tacticIndexes[$idx] = $t }
+    }
+    $ordered = @($tacticIndexes.Keys | Sort-Object | ForEach-Object { $tacticIndexes[$_] })
+    $title = ''
+    if ($accounts.Count -gt 0 -and $hosts.Count -gt 0) { $title = "$($accounts[0]) on $($hosts[0])" }
+    elseif ($accounts.Count -gt 0) { $title = "$($accounts[0])" }
+    elseif ($hosts.Count -gt 0) { $title = "$($hosts[0])" }
+    elseif ($ips.Count -gt 0) { $title = "activity from $($ips[0])" }
+    else { $title = 'related alerts' }
+    $chains += [PSCustomObject]@{
+      id = Get-ChainId $key
+      title = $title
+      entities = [PSCustomObject]@{ accounts = $accounts; hosts = $hosts; ips = $ips }
+      firstSeen = $members[0].When.ToUniversalTime().ToString('o')
+      lastSeen = $members[$members.Count - 1].When.ToUniversalTime().ToString('o')
+      maxSeverity = $sev
+      tacticsInOrder = $ordered
+      alerts = @($members | ForEach-Object {
+        [PSCustomObject]@{
+          id = [int]$_.Alert.Id
+          title = "$($_.Alert.Title)"
+          severity = "$($_.Alert.Severity)"
+          tactic = $_.Tactic
+          technique = "$($_.Alert.MitreId)"
+          time = $_.When.ToUniversalTime().ToString('o')
+        }
+      })
+    }
+  }
+  # most severe first, then newest; capped
+  $chains = @($chains | Sort-Object -Property @{ e = { $SevScore["$_($it.maxSeverity)"] } }, @{ e = { "$($_.lastSeen)" } } -Descending -ErrorAction SilentlyContinue)
+  if ($chains.Count -gt $Script:MaxChains) { $chains = @($chains | Select-Object -First $Script:MaxChains) }
+  return $chains
+}
+
+
+
 # ---- request body limits (web DoS guard) ----------------------------------
 # A POST body is attacker-controlled and this server is SINGLE-THREADED, so an
 # unbounded read is a denial of service: one client can hold the only thread
@@ -3188,6 +3306,7 @@ $Script:StaticFiles = @{
   '/js/pages/rules.js'    = @{ file = 'js/pages/rules.js';    type = 'application/javascript; charset=utf-8' }
   '/js/pages/events.js'   = @{ file = 'js/pages/events.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/settings.js' = @{ file = 'js/pages/settings.js'; type = 'application/javascript; charset=utf-8' }
+  '/js/pages/chains.js'   = @{ file = 'js/pages/chains.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/assets.js'   = @{ file = 'js/pages/assets.js';   type = 'application/javascript; charset=utf-8' }
 }
 
@@ -3484,6 +3603,10 @@ function Invoke-Handler($ctx) {
         if ($detail.error) { Send-Json $res ('{"error":"' + $detail.error + '"}') $detail.status; return }
         Send-Json $res (('{"asset":' + ($detail.asset | ConvertTo-Json -Depth 6) +
                          ',"timeline":' + (ConvertTo-JsonArray $detail.timeline) + '}'))
+      }
+      '^/api/chains$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        Send-Json $res (ConvertTo-JsonArray (Get-AttackChains))
       }
       '^/api/overview$' {
         if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
