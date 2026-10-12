@@ -253,18 +253,22 @@ respected.
 
 Five pages, one file each (see `js/pages/`):
 
-- **Overview** - five stat tiles with deltas and sparklines (open alerts, critical,
-  high, hosts seen, detection coverage), an alerts-by-severity bar, a coverage meter
-  with a "N rules blind" banner that links to the Rules page, an hourly
-  events/alerts chart drawn as inline SVG (no chart library), the top MITRE tactics,
-  the latest alerts and the latest events.
+- **Overview** - five stat tiles with delta arrows and sparklines (open alerts,
+  critical, high, hosts seen, detection coverage), an alerts-by-severity bar, a
+  coverage meter that counts only CONFIRMED families (with an "N unverified" note
+  and a "N rules blind" banner linking to the Rules page), an hourly events/alerts
+  chart drawn as inline SVG (no chart library; it draws a real chart even with one
+  or two buckets), the top MITRE tactics, the latest six alerts (one line each -
+  the description lives in the Alerts drawer) and the latest events.
 - **Alerts** - severity / status / ack filter chips, a search box, a table, and a
   right-side drawer with the full detail: status dropdown (New / Investigating /
   Resolved / False Positive), a **separate** acknowledge toggle, the contributing
   events and a kill-chain timeline of the other alerts for the same host or account,
   in time order, tagged with their tactic.
-- **Detection Rules** - all 28 families with their audit-policy state, and for a
-  BLIND family the reason and the exact `auditpol` command that fixes it.
+- **Detection Rules** - all 28 families with their audit-policy state: Working,
+  amber **Unverified** when the policy could not be read (that is not working, and
+  it is counted separately in the header), or BLIND with the reason and the exact
+  `auditpol` command that fixes it.
 - **Events** - the last 300 normalised events, newest first, with the endpoint's
   filters (event id, host, user, substring).
 - **Settings** - read-only: version, poll/bind/port, session and rate limits,
@@ -340,7 +344,7 @@ event log, no HTTP and no network needed - by a runner that drives the same
 functions the live monitor uses:
 
 ```powershell
-.\tests\run-tests.ps1      # 536 assertions, exit code 1 on any failure
+.\tests\run-tests.ps1      # 599 assertions, exit code 1 on any failure
 ```
 
 It covers detection behaviour in both directions, dedupe-per-entity, the

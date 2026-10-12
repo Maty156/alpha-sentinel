@@ -1,5 +1,38 @@
 ﻿# Changelog
 
+## v2.3.1
+
+Review fixes only - no new features. **599 assertions** (`tests/run-tests.ps1`).
+
+1. **Coverage counts only CONFIRMED families.** A rule whose audit state could not
+   be read is unverified, not working - counting `unknown` as `working` is how a
+   blind deployment reports 100%. `coverage.percent = rulesWorking / rulesTotal`
+   where working = total - blind - unknown, with new `rulesUnknown` and
+   `unknownRules` fields, an "N unverified" note on the coverage tile, an amber
+   **Unverified** badge (plus a count line and a banner) on the Detection Rules
+   page, and `health = 'degraded'` (amber) while the policy is unreadable.
+2. **Every array the API returns is an array.** An empty collection returned from a
+   PowerShell function arrives as `$null`, and `@($null)` serialised as `[null]`.
+   `ConvertTo-JsonArray` now returns `[]` for null and skips null elements, so
+   `/api/hosts` (and every other list endpoint) is `[]` when empty.
+3. **Top MITRE tactics** render as "Tactic ...... count" - no bullets, a dotted
+   leader, the number right-aligned - and the rows are actually wrapped in the
+   styled list (bare `<li>` nodes kept the browser's bullets).
+4. **Overview > Recent Alerts** is capped at 6 rows, one line each (severity,
+   title, host, account, time, status). The description moved to the Alerts drawer
+   where the detail lives.
+5. **Charts**: the hourly chart draws its area, line, baseline and hour labels even
+   with one or two buckets (a single point is duplicated into a flat line, and each
+   hour is labelled once); the tiles carry sparklines that fit their box plus delta
+   arrows (up / down / neutral, coloured by what the metric means).
+6. **Polish**: the banner says v2.3.1; `hosts[].users` holds account names (a
+   `CN=...` DN prefix is stripped); self-test and history-restored alerts are given
+   tactic / technique / entity from the rule catalogue so no row renders blanks;
+   and both pages declare an inline favicon (`<link rel="icon" href="data:,">`) so
+   the console has no 404. Two render defects found while re-checking visually were
+   fixed: the tile sparklines overflowed their tiles (`.spark` hard-codes the big
+   chart's height), and the tactic rows were missing their list wrapper.
+
 ## v2.3
 
 Three parts: a security fix for a freeze one client could trigger, the backend the

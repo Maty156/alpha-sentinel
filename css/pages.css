@@ -1,11 +1,22 @@
 /* pages.css - OWNER: rules that only one page needs. */
 /* overview */
 .overview-latest { grid-column: 1 / -1; }
-.tactic-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.tactic-list li { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-table); }
-.tactic-list .t-name { flex: 1 1 auto; color: var(--text-dim); }
-.tactic-list .t-count { font-variant-numeric: tabular-nums; color: var(--text); }
-.tactic-bar { height: 6px; border-radius: var(--radius-pill); background: var(--brand); min-width: 3px; }
+.tactic-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.tactic-list li { display: flex; align-items: baseline; gap: 8px; font-size: var(--fs-table); }
+.tactic-list .t-name {
+  color: var(--text-dim); max-width: 62%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* the dotted leader between the tactic and its count */
+.tactic-list .t-lead {
+  flex: 1 1 auto; min-width: 14px; border-bottom: 1px dotted var(--line-2); transform: translateY(-3px);
+}
+.tactic-list .t-count {
+  color: var(--text); font-variant-numeric: tabular-nums; text-align: right; min-width: 3ch; font-weight: 600;
+}
+.tile-note { font-size: var(--fs-cap); }
+.tile-note.warn { color: var(--warn); }
+.tile-note.bad { color: var(--bad); }
+.rule-unknown { color: var(--warn); border-color: var(--warn); }
 .coverage-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2); }
 .coverage-value { font-size: 26px; font-weight: 600; color: var(--ok); }
 .coverage-value.warn { color: var(--warn); }

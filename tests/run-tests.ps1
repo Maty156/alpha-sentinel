@@ -1235,14 +1235,38 @@ try {
   }
   Assert-True ($ov.version -eq $Script:SentinelVersion) 'the overview reports the version'
   Assert-True ($ov.coverage.rulesTotal -eq $RuleMeta.Count) 'coverage counts every rule family'
-  Assert-True ($ov.coverage.percent -eq 100) 'with the policy unreadable no rule is called blind, so coverage is 100%'
-  Assert-True ($ov.health -eq 'ok') 'and health is ok'
+  $Script:AuditState = $null
+  $ov = Get-OverviewPayload
+  Assert-True ($ov.coverage.rulesUnknown -gt 0) 'an unreadable policy leaves families unverified'
+  Assert-True ($ov.coverage.percent -lt 100) 'and unverified families do NOT count as working (coverage is not 100%)'
+  Assert-True ($ov.coverage.rulesWorking -eq ($ov.coverage.rulesTotal - $ov.coverage.rulesBlind - $ov.coverage.rulesUnknown)) 'working = total - blind - unverified'
+  Assert-True ($ov.coverage.percent -eq [int][Math]::Round((100.0 * $ov.coverage.rulesWorking) / $ov.coverage.rulesTotal)) 'percent is confirmed-working over the total'
+  Assert-True ($ov.coverage.unknownRules.Count -eq $ov.coverage.rulesUnknown) 'the unverified families are listed for the Rules page'
+  Assert-True ($ov.health -eq 'degraded') 'health is degraded (amber) while the audit policy cannot be read'
   Assert-True ((Get-OverviewPayload).tiles.openAlerts -eq 0) 'an idle system has no open alerts'
+
+  # every gated subcategory readable and on: coverage is confirmed at 100%.
+  # A fresh table each time: assigning the same hashtable twice and mutating it
+  # once kept the override and made the "reads clean" case fail.
+  function New-ReadableAuditState {
+    $subs = @{}
+    foreach ($rk in $RuleAudit.Keys) {
+      foreach ($sn in @($RuleAudit[$rk].Sub)) { if ($sn) { $subs["$sn".ToLower()] = 'Success and Failure' } }
+    }
+    return ,$subs
+  }
+  $readableSubs = New-ReadableAuditState
+  $Script:AuditState = $readableSubs
+  $ovOk = Get-OverviewPayload
+  Assert-True ($ovOk.coverage.rulesUnknown -eq 0) 'with the policy readable nothing is unverified'
+  Assert-True ($ovOk.coverage.percent -eq 100) 'a readable, fully enabled policy confirms 100% coverage'
+  Assert-True ($ovOk.health -eq 'ok') 'and health is ok'
+  $Script:LastPollCapped = $false
 
   # a blind family drops coverage and flips health to blind
   $gated = @(Get-RuleCatalog | Where-Object { "$($_.auditSubcategory)" } | Select-Object -First 1)
   $sub = ("$($gated[0].auditSubcategory)" -split ' \+ ')[0].ToLower()
-  $Script:AuditState = @{}
+  $Script:AuditState = $readableSubs
   $Script:AuditState[$sub] = 'No Auditing'
   $ovb = Get-OverviewPayload
   Assert-True ($ovb.coverage.rulesBlind -ge 1) 'a family whose audit subcategory is off is counted blind'
@@ -1251,8 +1275,10 @@ try {
   Assert-True ($ovb.coverage.blindRules.Count -ge 1) 'the blind rules are listed for the Rules page'
   Assert-True ("$($ovb.coverage.blindRules[0].reason)".Length -gt 0) 'each with the reason it cannot fire'
   Assert-True ($ovb.health -eq 'blind') 'health reports blind when a family cannot fire'
+  $Script:AuditState = New-ReadableAuditState
+  Assert-True ((Get-OverviewPayload).health -eq 'ok') 'and returns to ok when the policy reads clean'
   $Script:AuditState = $null
-  Assert-True ((Get-OverviewPayload).health -eq 'ok') 'and returns to ok when it can be read again'
+  Assert-True ((Get-OverviewPayload).health -eq 'degraded') 'unreadable again, it goes back to degraded rather than claiming health'
 
   # --- /api/events --------------------------------------------------------
   Reset-Engine
@@ -1456,6 +1482,115 @@ try {
   Assert-True ((Get-RepoText 'js/api.js').Contains("credentials: 'same-origin'")) 'API calls carry the session cookie'
   Assert-True ((Get-RepoText 'js/api.js').Contains('401')) 'and a 401 sends the browser to the sign-in page'
   Assert-True ((Get-RepoText 'js/pages/settings.js').Contains('Read-only') -or (Get-RepoText 'js/pages/settings.js').Contains('read-only')) 'Settings presents itself as read-only'
+
+  Write-Host ""
+  Write-Host "== v2.3.1 review fixes ==" -ForegroundColor Cyan
+
+  # --- 1. coverage counts only CONFIRMED families ---------------------------
+  Reset-Engine
+  $Script:AuditState = $null
+  $cov = (Get-OverviewPayload).coverage
+  Assert-True ($cov.rulesWorking + $cov.rulesBlind + $cov.rulesUnknown -eq $cov.rulesTotal) 'working + blind + unverified accounts for every family'
+  Assert-True (-not ($cov.PSObject.Properties.Name -contains 'rulesVerifiedOnly')) 'the payload keeps one vocabulary (rulesWorking/rulesBlind/rulesUnknown)'
+  Assert-True ($cov.rulesUnknown -gt 0 -and $cov.percent -lt 100) 'an unreadable policy cannot report full coverage'
+  $rulesJs = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'js/pages/rules.js')
+  Assert-True ($rulesJs.Contains("'Unverified'")) 'the Rules page labels an unreadable family Unverified, not Working'
+  Assert-True ($rulesJs.Contains('unknown')) 'and counts them'
+  Assert-True ($rulesJs.Contains('unverified')) 'with the count on the page'
+  $ovJs = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'js/pages/overview.js')
+  Assert-True ($ovJs.Contains('rulesUnknown')) 'the coverage tile reads rulesUnknown'
+  Assert-True ($ovJs.Contains('unverified')) 'and shows "N unverified"'
+  $appJs2 = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'js/app.js')
+  Assert-True ($appJs2.Contains("'degraded'")) 'the health pill renders the degraded state as amber'
+
+  # --- 2. every array the API returns is an array ---------------------------
+  Assert-True ((ConvertTo-JsonArray $null) -eq '[]') 'a null collection serialises as []'
+  Assert-True ((ConvertTo-JsonArray @()) -eq '[]') 'an empty array serialises as []'
+  $one = ConvertTo-JsonArray @([PSCustomObject]@{ a = 1 })
+  Assert-True ($one -eq '[{"a":1}]') 'a single element still serialises as an array'
+  $two = ConvertTo-JsonArray @([PSCustomObject]@{ a = 1 }, [PSCustomObject]@{ a = 2 })
+  Assert-True (([regex]::Matches($two, '\{"a":')).Count -eq 2) 'two elements serialise as two'
+  Assert-True ((ConvertTo-JsonArray @($null)) -eq '[]') 'a null ELEMENT is not an entry'
+  # the real paths that produced [null]
+  Reset-Engine
+  Assert-True ($Script:ObsHosts.Count -eq 0) 'no hosts tracked yet'
+  Assert-True ((ConvertTo-JsonArray (Get-HostsPayload)) -eq '[]') '/api/hosts serialises an empty host map as []'
+  $evEmpty = Get-EventsPayload (New-Query @{})
+  Assert-True ((ConvertTo-JsonArray $evEmpty.events) -eq '[]') '/api/events serialises an empty buffer as []'
+  Assert-True ((ConvertTo-JsonArray (Get-AlertRows)) -eq '[]') '/api/alerts serialises an empty alert list as []'
+  Assert-True (-not ((ConvertTo-JsonArray (Get-HostsPayload)).Contains('null'))) 'and never emits a null entry'
+  # the guard lives inside the one helper every API array goes through (it moved
+  # to the engine slice so the suite could reach it)
+  Assert-True ($raw.Contains('if ($null -eq $items) { return ''[]'' }')) 'the guard lives in the one function every array goes through'
+  Assert-True ($raw.Contains('if ($null -eq $i) { continue }')) 'and a null element is skipped rather than serialised'
+
+  # --- 6. polish -----------------------------------------------------------
+  Assert-True ($Script:SentinelVersion -eq '2.3.1') 'the version is 2.3.1'
+  Assert-True ($raw.Contains('ALPHA SENTINEL v2.3.1')) 'the script header says v2.3.1'
+  Assert-True ($raw.Contains('ALPHA SENTINEL v2.3.1 - AD / Network Attack Monitor')) 'and so does the startup banner'
+
+  # account names, not distinguished names
+  Assert-True ((ConvertTo-AccountName 'CN=attacker,OU=Corp,DC=example,DC=local') -eq 'attacker') 'a DN is trimmed to the account'
+  Assert-True ((ConvertTo-AccountName 'CN=svc-sql,OU=Servers') -eq 'svc-sql') 'including a nested OU'
+  Assert-True ((ConvertTo-AccountName 'jsmith') -eq 'jsmith') 'a plain account name is untouched'
+  Assert-True ((ConvertTo-AccountName '') -eq '') 'and empty stays empty'
+  Reset-Engine
+  Add-ObservedEvent 'Security' @{ eventId = '4728'; hostname = 'DC01'; accountName = 'CN=attacker,OU=Corp,DC=example,DC=local' } 'privilege_escalation' $when
+  $h1 = Get-HostsPayload
+  Assert-True ($h1[0].users -contains 'attacker') 'hosts[].users holds the account name'
+  Assert-True (-not ($h1[0].users -contains 'CN=attacker,OU=Corp,DC=example,DC=local')) 'and never the DN'
+  Assert-True ("$($Script:ObsEvents[0].user)" -eq 'attacker') 'the events feed shows the account name too'
+
+  # self-test alerts carry a tactic and an entity
+  Reset-Engine
+  $probe = @(New-SelfTestProbes | Where-Object { $_.ruleKey -eq 'privilege_escalation' })[0]
+  $probeAlert = Evaluate-Event (New-EventShim $probe)
+  Assert-True ($null -ne $probeAlert) 'a self-test probe still fires through the real engine'
+  if ($probeAlert) {
+    Assert-True ("$($probeAlert.Tactic)".Length -gt 0) 'a self-test alert carries its MITRE tactic'
+    Assert-True ("$($probeAlert.Entity)".Length -gt 0) 'and its entity'
+    Assert-True ("$($probeAlert.MitreId)" -match '^T\d{4}') 'and its technique id'
+    $probeAlert.SelfTest = $true
+    Assert-True ("$($probeAlert.Tactic)".Length -gt 0) 'still tagged with a tactic after being marked self-test'
+  }
+  # a row restored from history (no tactic on the object) still gets one
+  Reset-Engine
+  $restored = [PSCustomObject]@{
+    Id = 99; Time = (Get-Date).ToUniversalTime().ToString('o'); RuleKey = 'dcsync_replication'
+    Rule = '4662'; Severity = 'Critical'; Title = 'Directory Replication'; Mitre = 'T1003.006 - OS Credential Dumping: DCSync'
+    Remediation = 'x'; Description = 'x'; Host = 'DC01'; Account = 'attacker'; SourceIp = '10.0.0.5'
+    EventId = '4662'; Acknowledged = $false; Status = 'New'; Notes = ''; SelfTest = $false
+  }
+  $Script:Alerts.Add($restored)
+  $row = @(Get-AlertRows)[0]
+  Assert-True ("$($row.Tactic)".Length -gt 0) 'a restored row is given its tactic from the rule catalogue'
+  Assert-True ("$($row.MitreId)" -eq 'T1003.006') 'and its technique id from the MITRE string'
+  Assert-True ("$($row.Entity)" -eq 'attacker') 'and falls back to the account for its entity'
+  Assert-True ([int]$row.Count -eq 1 -and "$($row.FirstSeen)".Length -gt 0) 'and defaults count/first-seen so the drawer renders'
+
+  # the favicon is inline, so the console has no 404 to complain about
+  foreach ($html2 in @('dashboard.html', 'login.html')) {
+    $htxt = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) $html2)
+    Assert-True ($htxt.Contains('rel="icon"')) ("   " + $html2 + ' declares a favicon')
+    Assert-True ($htxt -match 'rel="icon" href="data:,') ("   " + $html2 + ' uses an inline icon (no extra file to serve or 404)')
+  }
+
+  # and the design polish the review asked for, in the stylesheet
+  $pagesCss = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'css/pages.css')
+  Assert-True ($pagesCss.Contains('.tactic-list .t-lead')) 'the tactic rows have a dotted leader between name and count'
+  Assert-True ($pagesCss.Contains('border-bottom: 1px dotted')) 'drawing the leader'
+  Assert-True ($pagesCss.Contains('.tactic-list .t-count') -and $pagesCss.Contains('text-align: right')) 'with the count right-aligned'
+  Assert-True ($pagesCss.Contains('list-style: none')) 'and no bullets'
+  Assert-True ((Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'js/pages/overview.js')).Contains("'ul', { class: 'tactic-list' }")) 'the tactic rows are wrapped in the styled list'
+  Assert-True (-not $pagesCss.Contains('.tactic-bar {')) 'the old bar is gone'
+  $compCss = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'css/components.css')
+  Assert-True ($compCss.Contains('.tile-delta .arrow')) 'the tiles style a delta arrow'
+  Assert-True ($compCss.Contains('.tile-delta.neutral')) 'and a neutral direction'
+  $uiJs = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'js/ui.js')
+  Assert-True ($uiJs.Contains('baseline')) 'the chart draws a baseline'
+  Assert-True ($uiJs.Contains('values.length === 1')) 'and a single bucket still draws a line'
+  Assert-True ($ovJs.Contains('slice(0, 6)')) 'Recent Alerts is capped at six rows'
+  Assert-True (-not ($ovJs -match 'alertsTable[\s\S]{0,1200}a\.Description')) 'and no longer prints the description there'
 
   Write-Host ""
   Write-Host "== fixture replay ==" -ForegroundColor Cyan

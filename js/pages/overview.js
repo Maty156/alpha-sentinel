@@ -9,42 +9,55 @@
   var lastAlerts = [];
 
   var TILES = [
-    { key: 'openAlerts', label: 'Active Alerts', glyph: '!' },
-    { key: 'critical', label: 'Critical', glyph: '\u25B2', sev: 'Critical' },
-    { key: 'high', label: 'High', glyph: '\u25B2', sev: 'High' },
-    { key: 'hostsSeen', label: 'Hosts Monitored', glyph: '\u25A6' },
+    { key: 'openAlerts', label: 'Active Alerts', glyph: '!', attention: true },
+    { key: 'critical', label: 'Critical', glyph: '\u25B2', sev: 'Critical', attention: true },
+    { key: 'high', label: 'High', glyph: '\u25B2', sev: 'High', attention: true },
+    { key: 'hostsSeen', label: 'Hosts Monitored', glyph: '\u25A6', attention: false },
     { key: 'coverage', label: 'Detection Coverage', glyph: '\u2713', coverage: true }
   ];
 
-  function deltaNode(value) {
+  /* An arrow for the direction plus the number, straight from
+     /api/overview.deltas. The colour follows what the metric means: more alerts
+     is attention (amber), more hosts is just coverage (teal), a fall is neither. */
+  function deltaNode(value, risingIsAttention) {
     var v = Number(value) || 0;
-    var cls = v > 0 ? 'tile-delta up' : (v < 0 ? 'tile-delta down' : 'tile-delta');
-    var text = v > 0 ? ('+' + v) : String(v);
-    return S.ui.el('span', { class: cls, text: text });
+    var arrow = v > 0 ? '\u25B2' : (v < 0 ? '\u25BC' : '\u2013');
+    var cls = 'tile-delta neutral';
+    if (v > 0) { cls = 'tile-delta ' + (risingIsAttention ? 'up' : 'good'); }
+    else if (v < 0) { cls = 'tile-delta down'; }
+    var node = S.ui.el('span', { class: cls, title: 'change against the previous hour' });
+    node.appendChild(S.ui.el('span', { class: 'arrow', text: arrow }));
+    node.appendChild(S.ui.el('span', { text: (v > 0 ? '+' + v : String(v)) }));
+    return node;
   }
 
   function tile(cfg, ov) {
     var hourly = (ov.hourly || []).map(function (h) { return h.events; });
-    var value, delta, extra = null;
+    var cov = ov.coverage || {};
+    var value, delta = null, notes = [];
     if (cfg.coverage) {
-      value = (ov.coverage ? ov.coverage.percent : 0) + '%';
-      delta = null;
-      var blind = ov.coverage ? ov.coverage.rulesBlind : 0;
-      extra = S.ui.el('span', { class: 'caption', text: blind > 0 ? (blind + ' rule(s) blind') : 'all families audited' });
+      value = (cov.percent || 0) + '%';
+      // coverage counts CONFIRMED families only, so an unreadable policy has to
+      // be visible here rather than quietly counted as working
+      if (Number(cov.rulesBlind) > 0) { notes.push(S.ui.el('span', { class: 'tile-note bad', text: cov.rulesBlind + ' blind' })); }
+      if (Number(cov.rulesUnknown) > 0) { notes.push(S.ui.el('span', { class: 'tile-note warn', text: cov.rulesUnknown + ' unverified' })); }
+      if (!notes.length) { notes.push(S.ui.el('span', { class: 'tile-note', text: 'all families verified' })); }
     } else {
       value = S.ui.fmtNum(ov.tiles ? ov.tiles[cfg.key] : 0);
-      delta = deltaNode(ov.deltas ? ov.deltas[cfg.key] : 0);
+      delta = deltaNode(ov.deltas ? ov.deltas[cfg.key] : 0, cfg.attention === true);
     }
     var icon = S.ui.el('span', { class: 'tile-icon', text: cfg.glyph });
     if (cfg.sev) { icon.classList.add('sev-' + cfg.sev); }
     var sparkHost = S.ui.el('div', { class: 'tile-spark' });
-    if (hourly.length > 1) {
-      sparkHost.appendChild(S.ui.sparkline(hourly, { width: 88, height: 22, padY: 3, label: cfg.label + ' hourly events' }));
+    if (hourly.length) {
+      // one bucket still draws (a flat line and a baseline), not an empty box
+      sparkHost.appendChild(S.ui.sparkline(hourly, { width: 88, height: 22, padY: 3, small: true, label: cfg.label + ' hourly events' }));
     }
     return S.ui.el('div', { class: 'tile' }, [
       S.ui.el('div', { class: 'tile-top' }, [icon, S.ui.el('span', { class: 'tile-label', text: cfg.label })]),
-      S.ui.el('div', { class: 'tile-row' }, [S.ui.el('span', { class: 'tile-value', text: value }), delta, extra]),
-      S.ui.el('div', { class: 'tile-foot' }, [extra && cfg.coverage ? S.ui.el('span', {}) : S.ui.el('span', { class: 'tile-delta', text: 'last 24 h' }), sparkHost])
+      S.ui.el('div', { class: 'tile-row' }, [S.ui.el('span', { class: 'tile-value', text: value }), delta]),
+      S.ui.el('div', { class: 'row', style: 'gap:8px;min-height:16px' }, notes),
+      S.ui.el('div', { class: 'tile-foot' }, [S.ui.el('span', { class: 'tile-delta neutral', text: 'last 24 h' }), sparkHost])
     ]);
   }
 
@@ -105,11 +118,18 @@
     if (!hourly.length) {
       body.appendChild(S.ui.empty('No hourly data yet', 'The chart fills as events are polled.'));
     } else {
+      // area + line + baseline, so one or two buckets still read as a chart
       body.appendChild(S.ui.sparkline(hourly.map(function (h) { return h.events; }), { fill: true, label: 'events per hour' }));
-      var axis = S.ui.el('div', { class: 'legend' });
-      [0, Math.floor(hourly.length / 2), hourly.length - 1].forEach(function (i) {
-        if (hourly[i]) { axis.appendChild(S.ui.el('span', { class: 'caption', text: hourly[i].hour })); }
-      });
+      // label each hour at most ONCE (a short series used to print the same hour twice)
+      var axis = S.ui.el('div', { class: 'legend', style: 'justify-content:space-between' });
+      var n = hourly.length;
+      var step = Math.max(1, Math.ceil(n / 6));
+      for (var i = 0; i < n; i += step) {
+        axis.appendChild(S.ui.el('span', { class: 'caption', text: hourly[i].hour }));
+      }
+      if (n > 1 && (n - 1) % step !== 0) {
+        axis.appendChild(S.ui.el('span', { class: 'caption', text: hourly[n - 1].hour }));
+      }
       body.appendChild(axis);
     }
     card.appendChild(body);
@@ -127,29 +147,37 @@
     }
     return S.ui.el('div', { class: 'card' }, [
       S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Top MITRE tactics' })]),
-      S.ui.el('div', { class: 'card-body' }, rows.length ? rows.map(function (r) {
-        return S.ui.el('li', {}, [
-          S.ui.el('span', { class: 't-name', text: r.name }),
-          S.ui.el('span', { class: 'tactic-bar', style: 'width:' + ((r.n / max) * 60 + 3).toFixed(0) + 'px' }),
-          S.ui.el('span', { class: 't-count', text: String(r.n) })
-        ]);
-      }) : S.ui.empty('No alerts mapped yet', 'Tactics appear when a rule fires.'))
+      // the rows must live inside the <ul class="tactic-list">: bare <li> nodes
+      // keep the browser's bullets and none of the leader/count styling
+      S.ui.el('div', { class: 'card-body' }, rows.length ? [S.ui.el('ul', { class: 'tactic-list' },
+        rows.map(function (r) {
+          // "Tactic ............ count": no bullets, the number right-aligned
+          return S.ui.el('li', { title: r.name + ' - ' + r.n + ' alert(s)' }, [
+            S.ui.el('span', { class: 't-name', text: r.name }),
+            S.ui.el('span', { class: 't-lead' }),
+            S.ui.el('span', { class: 't-count', text: String(r.n) })
+          ]);
+        })
+      )] : S.ui.empty('No alerts mapped yet', 'Tactics appear when a rule fires.'))
     ]);
   }
 
   function alertsTable(alerts, filterText) {
-    var rows = alerts.slice(0, 8);
+    // six rows, one line each: severity, title, host, account, time, status. The
+    // description and the rest of the detail belong to the drawer on the Alerts page.
+    var rows = alerts;
     if (filterText) {
       var q = filterText.toLowerCase();
       rows = alerts.filter(function (a) {
         return (String(a.Title) + ' ' + a.Host + ' ' + a.Account + ' ' + a.Severity).toLowerCase().indexOf(q) >= 0;
-      }).slice(0, 8);
+      });
     }
+    rows = rows.slice(0, 6);
     var tbody = S.ui.el('tbody');
     rows.forEach(function (a) {
       var tr = S.ui.el('tr', {}, [
         S.ui.el('td', {}, [S.ui.sevBadge(a.Severity)]),
-        S.ui.el('td', {}, [S.ui.el('div', { class: 'alert-title', text: a.Title }), S.ui.el('div', { class: 'caption', text: a.Description })]),
+        S.ui.el('td', {}, [S.ui.el('span', { class: 'alert-title truncate', style: 'display:block', title: a.Title, text: a.Title })]),
         S.ui.el('td', { class: 'cell-dim', text: a.Host || '-' }),
         S.ui.el('td', { class: 'cell-dim', text: a.Account || '-' }),
         S.ui.el('td', { class: 'cell-mute', text: S.ui.fmtAgo(a.Time) }),

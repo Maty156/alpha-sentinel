@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-# ALPHA SENTINEL v2.2 - AD / Network Attack Monitor (background service + web UI)
+# ALPHA SENTINEL v2.3.1 - AD / Network Attack Monitor (background service + web UI)
 # ============================================================================
 # A standalone Windows security monitor from the ALPHA Cybersecurity project.
 # Like Wazuh's agent+dashboard model, but as ONE script with zero dependencies:
@@ -884,6 +884,16 @@ $EventPhrases = @{
   '4616' = 'System time changed'
 }
 
+# MemberName / SubjectUserName / TargetUserName can arrive as a distinguished name
+# ("CN=attacker,OU=Corp,DC=example,DC=local") for group-membership events, and the
+# dashboard wants the account, not its path in the directory.
+function ConvertTo-AccountName([string]$value) {
+  if (-not $value) { return '' }
+  $v = "$value".Trim()
+  if ($v -match '^\s*CN\s*=\s*([^,]+)') { return $Matches[1].Trim() }
+  return $v
+}
+
 # One short line describing an event, for the ring buffer and the kill-chain.
 # Bounded on purpose: a dashboard row is not the place for a 4 KB command line.
 function Get-EventSummary($fields, [string]$ruleKey = '') {
@@ -969,8 +979,8 @@ function Update-HostSeen($fields, [bool]$isAlert) {
   $rec = $Script:ObsHosts[$h]
   $rec.lastSeen = $now
   if ($isAlert) { $rec.alertCount = [int]$rec.alertCount + 1 } else { $rec.eventCount = [int]$rec.eventCount + 1 }
-  $u = "$($fields.accountName)"
-  if (-not $u) { $u = "$($fields.subjectUserName)" }
+  $u = ConvertTo-AccountName "$($fields.accountName)"
+  if (-not $u) { $u = ConvertTo-AccountName "$($fields.subjectUserName)" }
   if ($u -and $u -ne '') {
     $users = @($rec.users)
     if ($users -notcontains $u) {
@@ -1002,9 +1012,9 @@ function Add-ObservedEvent($channel, $fields, $matchedRule, $when = $null) {
   if (-not $fields) { return }
   $ts = $when
   if (-not $ts) { $ts = Get-Date }
-  $user = "$($fields.accountName)"
-  if (-not $user) { $user = "$($fields.subjectUserName)" }
-  if (-not $user) { $user = "$($fields.targetUserName)" }
+  $user = ConvertTo-AccountName "$($fields.accountName)"
+  if (-not $user) { $user = ConvertTo-AccountName "$($fields.subjectUserName)" }
+  if (-not $user) { $user = ConvertTo-AccountName "$($fields.targetUserName)" }
   $entry = [PSCustomObject]@{
     time        = $ts.ToUniversalTime().ToString("o")
     eventId     = "$($fields.eventId)"
@@ -1085,12 +1095,16 @@ function Get-OverviewPayload {
     $delta.eventsLastHour = [int]$tiles.eventsLastHour
   }
 
-  # coverage = rules that are not BLIND, from the existing audit preflight
+  # coverage = rules CONFIRMED able to fire, from the existing audit preflight.
+  # A rule whose audit state could not be read is unverified, not working:
+  # counting unknown as working is exactly how a blind deployment reports 100%.
   $rules = @(Get-RuleCatalog)
   $blind = @($rules | Where-Object { $_.auditState -eq 'blind' })
+  $unknown = @($rules | Where-Object { $_.auditState -eq 'unknown' })
   $total = $rules.Count
-  $working = $total - $blind.Count
-  $percent = 100
+  $working = $total - $blind.Count - $unknown.Count
+  if ($working -lt 0) { $working = 0 }
+  $percent = 0
   if ($total -gt 0) { $percent = [int][Math]::Round((100.0 * $working) / $total) }
 
   $sevCounts = @{ Critical = 0; High = 0; Medium = 0; Low = 0 }
@@ -1117,9 +1131,10 @@ function Get-OverviewPayload {
 
   $catch = Get-CatchUpState $Script:LagSeconds
   $blindCount = $blind.Count
+  $unknownCount = $unknown.Count
   $health = 'ok'
   if ($blindCount -gt 0) { $health = 'blind' }
-  elseif ($catch.catchingUp -or $Script:EvalErrors -gt 0 -or $Script:LagSeconds -gt 120) { $health = 'degraded' }
+  elseif ($unknownCount -gt 0 -or $catch.catchingUp -or $Script:EvalErrors -gt 0 -or $Script:LagSeconds -gt 120) { $health = 'degraded' }
 
   return [PSCustomObject]@{
     tiles = [PSCustomObject]@{
@@ -1131,11 +1146,13 @@ function Get-OverviewPayload {
     }
     deltas = $delta
     coverage = [PSCustomObject]@{
-      percent     = $percent
-      rulesTotal  = $total
+      percent      = $percent
+      rulesTotal   = $total
       rulesWorking = $working
-      rulesBlind  = $blindCount
-      blindRules  = @($blind | ForEach-Object { [PSCustomObject]@{ id = $_.key; name = $_.title; reason = $_.auditDetail } })
+      rulesBlind   = $blindCount
+      rulesUnknown = $unknownCount
+      blindRules   = @($blind | ForEach-Object { [PSCustomObject]@{ id = $_.key; name = $_.title; reason = $_.auditDetail } })
+      unknownRules = @($unknown | ForEach-Object { [PSCustomObject]@{ id = $_.key; name = $_.title; reason = $_.auditDetail } })
     }
     severityCounts = $sevCounts
     tacticCounts   = $tacticCounts
@@ -1268,6 +1285,52 @@ function Get-SettingsPayload {
   }
 }
 
+# ---- JSON array serialisation (PS 5.1 has no -AsArray) ----------------------
+# Lives here rather than in the web section so the test harness can drive it: it
+# is a pure helper, and its empty-collection case is exactly what needs a test.
+# PowerShell 5.1 has no ConvertTo-Json -AsArray, so always build the array
+# explicitly - a single-element list must still serialise as [ ... ], not { ... }.
+function ConvertTo-JsonArray($items) {
+  # An empty array RETURNED from a function arrives here as $null (PowerShell
+  # enumerates the return value), and @($null) is a one-element array holding
+  # $null - which serialised as [null]. Every array the API returns goes through
+  # here, so an empty hosts list or alert list is an empty array.
+  if ($null -eq $items) { return '[]' }
+  $parts = @()
+  foreach ($i in @($items)) {
+    if ($null -eq $i) { continue }
+    $parts += ($i | ConvertTo-Json -Compress -Depth 6)
+  }
+  return "[" + ($parts -join ",") + "]"
+}
+
+# The alert rows the JSON API returns. Fields (the full normalised event kept
+# for web forwarding) is deliberately NOT serialised - the dashboard never reads
+# it, and re-serialising it for every alert on every 10-second poll of every
+# open tab was most of /api/alerts' cost.
+function Get-AlertRows {
+  # Fields (the full normalised event kept for web forwarding) is still NOT
+  # serialised; the drawer gets the bounded contributing-event summaries instead.
+  #
+  # Tactic / technique / entity are derived from the rule catalogue when the row
+  # does not carry them, so an alert restored from history - or a synthetic
+  # self-test row - still shows its tactic and entity instead of blanks.
+  return @($Script:Alerts | Select-Object Id, Time, RuleKey, Rule, Severity, Title, Mitre,
+    @{ n = 'MitreId'; e = { if ($_.MitreId) { "$($_.MitreId)" } elseif ($_.Mitre) { (Get-MitreParts "$($_.Mitre)").id } else { '' } } },
+    @{ n = 'MitreName'; e = { if ($_.MitreName) { "$($_.MitreName)" } elseif ($_.Mitre) { (Get-MitreParts "$($_.Mitre)").name } else { '' } } },
+    @{ n = 'Tactic'; e = {
+        if ($_.Tactic) { "$($_.Tactic)" }
+        elseif ($_.RuleKey -and $RuleMeta[$_.RuleKey]) { Get-MitreTactic "$($RuleMeta[$_.RuleKey].Category)" }
+        else { '' } } },
+    @{ n = 'Entity'; e = { if ($_.Entity) { "$($_.Entity)" } elseif ($_.Account) { "$($_.Account)" } else { "$($_.Host)" } } },
+    Remediation, Description, Host, Account, SourceIp,
+    EventId, Acknowledged, Status, Notes, SelfTest,
+    @{ n = 'FirstSeen'; e = { if ($_.FirstSeen) { "$($_.FirstSeen)" } else { "$($_.Time)" } } },
+    @{ n = 'LastSeen'; e = { if ($_.LastSeen) { "$($_.LastSeen)" } else { "$($_.Time)" } } },
+    @{ n = 'Count'; e = { if ($_.Count) { [int]$_.Count } else { 1 } } },
+    Events)
+}
+
 # ---- request body limits (web DoS guard) ----------------------------------
 # A POST body is attacker-controlled and this server is SINGLE-THREADED, so an
 # unbounded read is a denial of service: one client can hold the only thread
@@ -1337,7 +1400,7 @@ $Script:MaxBodyStalls = 3       # stalls from one address before it is blocked
 $Script:BodyStalls = @{}        # ip -> stalls seen (in-memory, per process)
 
 # ---- ALPHA SENTINEL version ------------------------------------------------
-$Script:SentinelVersion = '2.3'
+$Script:SentinelVersion = '2.3.1'
 # true only when the operator started the monitor with -DemoData: the dashboard
 # then labels itself as a demo instead of pretending the numbers are real
 $Script:DemoData = [bool]$DemoData
@@ -2810,13 +2873,6 @@ $Script:StaticFiles = @{
   '/js/pages/settings.js' = @{ file = 'js/pages/settings.js'; type = 'application/javascript; charset=utf-8' }
 }
 
-# PowerShell 5.1 has no ConvertTo-Json -AsArray, so always build the array
-# explicitly - a single-element list must still serialise as [ ... ], not { ... }.
-function ConvertTo-JsonArray($items) {
-  $parts = @()
-  foreach ($i in @($items)) { $parts += ($i | ConvertTo-Json -Compress -Depth 6) }
-  return "[" + ($parts -join ",") + "]"
-}
 
 function Start-WebServer {
   $listener = New-Object System.Net.HttpListener
@@ -2858,17 +2914,6 @@ function Start-WebServer {
   return $listener
 }
 
-# The alert rows the JSON API returns. Fields (the full normalised event kept
-# for web forwarding) is deliberately NOT serialised - the dashboard never reads
-# it, and re-serialising it for every alert on every 10-second poll of every
-# open tab was most of /api/alerts' cost.
-function Get-AlertRows {
-  # Fields (the full normalised event kept for web forwarding) is still NOT
-  # serialised; the drawer gets the bounded contributing-event summaries instead.
-  return @($Script:Alerts | Select-Object Id, Time, RuleKey, Rule, Severity, Title, Mitre,
-    MitreId, MitreName, Tactic, Entity, Remediation, Description, Host, Account, SourceIp,
-    EventId, Acknowledged, Status, Notes, SelfTest, FirstSeen, LastSeen, Count, Events)
-}
 
 # Handle a single HTTP request context. Called from the MAIN thread loop -
 # single-threaded by design: PowerShell scriptblocks cannot run on .NET
@@ -3827,7 +3872,7 @@ if ($usersState.ok) {
 
 Write-Host ""
 Write-Host "  ============================================================" -ForegroundColor Red
-Write-Host "   ALPHA SENTINEL v2.2 - AD / Network Attack Monitor" -ForegroundColor Red
+Write-Host "   ALPHA SENTINEL v2.3.1 - AD / Network Attack Monitor" -ForegroundColor Red
 Write-Host "  ============================================================" -ForegroundColor Red
 if ($listener) {
   if (-not $Bind -or $Bind -eq 'localhost' -or $Bind -eq '127.0.0.1') {

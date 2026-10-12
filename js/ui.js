@@ -130,16 +130,21 @@
       var w = o.width || 640, h = o.height || 130, padY = o.padY || 12;
       var ns = 'http://www.w3.org/2000/svg';
       var svg = document.createElementNS(ns, 'svg');
-      svg.setAttribute('class', 'spark');
+      svg.setAttribute('class', o.className2 || 'spark');
       svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
       svg.setAttribute('preserveAspectRatio', 'none');
       svg.setAttribute('role', 'img');
       svg.setAttribute('aria-label', o.label || 'hourly activity');
+      if (o.small) { svg.setAttribute('class', 'spark spark-sm'); }
       var values = (series || []).map(function (v) { return Number(v) || 0; });
       var max = Math.max.apply(null, values.concat([1]));
+      // one bucket must still draw: a flat line reads as "one hour of data",
+      // an empty chart reads as "broken". Duplicate the single point.
+      if (values.length === 1) { values = [values[0], values[0]]; }
       var n = Math.max(values.length, 2);
       var x = function (i) { return (i / (n - 1)) * w; };
       var y = function (v) { return h - padY - ((v / max) * (h - padY * 2)); };
+      var base = h - padY;
 
       for (var g = 0; g < 3; g++) {
         var ln = document.createElementNS(ns, 'line');
@@ -151,16 +156,22 @@
       }
       var d = '';
       for (var i = 0; i < values.length; i++) { d += (i === 0 ? 'M' : 'L') + x(i).toFixed(1) + ' ' + y(values[i]).toFixed(1) + ' '; }
-      if (o.fill && values.length > 1) {
+      if (o.fill) {
         var area = document.createElementNS(ns, 'path');
         area.setAttribute('class', 'area-events');
-        area.setAttribute('d', d + 'L' + x(values.length - 1).toFixed(1) + ' ' + (h - padY) + ' L0 ' + (h - padY) + ' Z');
+        area.setAttribute('d', d + 'L' + x(values.length - 1).toFixed(1) + ' ' + base.toFixed(1) + ' L0 ' + base.toFixed(1) + ' Z');
         svg.appendChild(area);
       }
       var path = document.createElementNS(ns, 'path');
       path.setAttribute('class', o.className || 'line-events');
       path.setAttribute('d', d.trim());
       svg.appendChild(path);
+      // a baseline, so a flat or single-bucket series still looks like a chart
+      var baseline = document.createElementNS(ns, 'line');
+      baseline.setAttribute('class', 'baseline');
+      baseline.setAttribute('x1', 0); baseline.setAttribute('x2', w);
+      baseline.setAttribute('y1', base.toFixed(1)); baseline.setAttribute('y2', base.toFixed(1));
+      svg.appendChild(baseline);
       return svg;
     }
   };

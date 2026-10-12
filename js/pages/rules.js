@@ -8,6 +8,7 @@
   var onlyBlind = false;
   var rules = [];
   var preflight = null;
+  var c = { working: 0, blind: 0, unknown: 0 };
 
   function fixFor(rule) {
     if (!preflight || !preflight.blind) { return ''; }
@@ -28,7 +29,9 @@
     }
     if (r.auditState === 'ok') { return S.ui.el('span', { class: 'badge rule-ok', text: 'Working' }); }
     if (r.auditState === 'n/a') { return S.ui.el('span', { class: 'badge rule-ok', text: 'Working', title: 'not gated by an audit-policy subcategory' }); }
-    return S.ui.el('span', { class: 'badge', text: 'Working', title: 'audit policy could not be read - run elevated to confirm coverage' });
+    // unreadable is NOT working: it is unverified, and it must not be counted
+    // towards coverage until an elevated run confirms the subcategory is on
+    return S.ui.el('span', { class: 'badge rule-unknown', text: 'Unverified', title: r.auditDetail || 'audit policy could not be read - run as Administrator' });
   }
 
   function paint() {
@@ -37,9 +40,15 @@
     S.ui.clear(view);
     var rows = rules.filter(function (r) { return onlyBlind ? r.auditState === 'blind' : true; });
     var blindCount = rules.filter(function (r) { return r.auditState === 'blind'; }).length;
+    var unknownCount = rules.filter(function (r) { return r.auditState === 'unknown'; }).length;
     if (blindCount > 0) {
       view.appendChild(S.ui.el('div', { class: 'banner banner-warn' }, [
         S.ui.el('span', { text: blindCount + ' famil' + (blindCount === 1 ? 'y is' : 'ies are') + ' blind: Windows is not writing their events, so no rule logic can help.' })
+      ]));
+    }
+    if (unknownCount > 0) {
+      view.appendChild(S.ui.el('div', { class: 'banner banner-warn' }, [
+        S.ui.el('span', { text: unknownCount + ' famil' + (unknownCount === 1 ? 'y is' : 'ies are') + ' unverified: the audit policy could not be read, so coverage cannot be confirmed. Run the monitor as Administrator (or check auditpol) to verify them.' })
       ]));
     }
     var tbody = S.ui.el('tbody');
@@ -65,7 +74,7 @@
         S.ui.el('h2', { text: 'Detection rules' }),
         S.ui.el('span', { class: 'grow spacer' }),
         S.ui.chip('Only blind', onlyBlind, function () { onlyBlind = !onlyBlind; paint(); }),
-        S.ui.el('span', { class: 'caption', text: rules.length + ' families' })
+        S.ui.el('span', { class: 'caption', text: c.working + ' working - ' + c.blind + ' blind - ' + c.unknown + ' unverified of ' + rules.length })
       ]),
       S.ui.el('div', { class: 'card-body tight' }, [S.ui.el('div', { class: 'table-wrap' }, [S.ui.el('table', { class: 'data' }, [
         S.ui.el('thead', {}, [S.ui.el('tr', {}, ['State', 'Rule', 'Severity', 'Event IDs', 'MITRE', 'Category', 'Fired'].map(function (h) { return S.ui.el('th', { text: h }); }))]),
@@ -81,6 +90,9 @@
     ]).then(function (out) {
       rules = (out[0] && out[0].rules) ? out[0].rules : [];
       preflight = out[1];
+      c.blind = rules.filter(function (r) { return r.auditState === 'blind'; }).length;
+      c.unknown = rules.filter(function (r) { return r.auditState === 'unknown'; }).length;
+      c.working = rules.length - c.blind - c.unknown;
       paint();
     }).catch(function (err) {
       var view = document.getElementById('view');
