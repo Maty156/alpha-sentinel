@@ -134,7 +134,14 @@ param(
   # The dashboard shows a "DEMO DATA" marker ONLY when the operator says this is
   # a lab demo. Production never invents numbers; an empty dashboard says it is
   # empty (see the v2.3 front end).
-  [switch]$DemoData
+  [switch]$DemoData,
+  # Enable the audit subcategories the rules need (opt-in: nothing is changed
+  # without this switch). Refuses without Administrator, backs up the current
+  # policy first, only ever turns things ON, and only what a rule needs.
+  [switch]$EnableAudit,
+  # Restore an audit-policy backup written by -EnableAudit
+  # (auditpol /restore /file:<that file>).
+  [string]$RestoreAudit = ""
 )
 
 if (-not $HistoryFile -and $PSScriptRoot) {
@@ -1314,6 +1321,7 @@ function Get-SettingsPayload {
       blindCount  = $pre.blindCount
       unknownCount = $pre.unknownCount
       fix         = @($pre.fix)
+      lastChange  = Get-LastAuditChange
     }
     users        = $users
     usersFileState = (Get-UsersFileState).reason
@@ -2804,6 +2812,148 @@ function Get-PreflightReport {
 }
 
 # ============================================================
+# AUDIT-POLICY SETUP (opt-in) - enable what the rules need, safely
+# ============================================================
+# Pasting "auditpol /set /subcategory:"User Account Management" ..." into
+# PowerShell FAILS: PowerShell strips the inner quotes, auditpol sees
+# /subcategory:User and prints its help text. The invocation below passes the
+# whole "/subcategory:<name>" as ONE argument, which reaches auditpol intact
+# (and works on non-English Windows too, via the subcategory GUID when the
+# name-to-GUID map is available).
+
+function Get-AuditSubcategoryGuids {
+  # auditpol /list /subcategory:* /v maps name -> GUID on THIS box; a GUID
+  # sidesteps any localisation of the subcategory names
+  $map = @{}
+  try {
+    $raw = & auditpol.exe /list /subcategory:* /v 2>$null
+    foreach ($line in @($raw)) {
+      # "  Logon                        {0CCE9215-69AE-11D9-BED3-505054503030}"
+      if ("$line" -match '^\s*(?<name>\S.*?)\s{2,}(?<guid>\{[0-9A-Fa-f-]+\})') {
+        $map[$Matches['name'].Trim().ToLower()] = $Matches['guid']
+      }
+    }
+  } catch { }
+  return $map
+}
+
+function Invoke-AuditpolSet([string]$SubArg, [string]$Flag) {
+  # SubArg arrives as "/subcategory:Logon" or "/subcategory:{guid}": ONE
+  # string. PowerShell passes it to auditpol.exe verbatim - the quotes inside
+  # it survive, unlike a hand-pasted command line.
+  & auditpol.exe /set $SubArg $Flag
+  return ($LASTEXITCODE -eq 0)
+}
+
+function Test-SentinelIsAdmin {
+  # The role check throws on non-Windows (the suite's host); there the answer is
+  # simply 'no', which is also what a non-elevated console should hear.
+  try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($id)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch {
+    return $false
+  }
+}
+
+function Enable-SentinelAuditPolicy {
+  # requires Administrator - auditpol /set fails without it, and half-applied
+  # audit policies are worse than none
+  if (-not (Test-SentinelIsAdmin)) {
+    Write-Host "  [audit] NOT ENABLED - enabling the audit policy requires Administrator." -ForegroundColor Red
+    return $false
+  }
+  $null = Update-AuditPreflight
+  if ($null -eq $Script:AuditState) {
+    Write-Host "  [audit] the audit policy could not be read - nothing to enable (run as Administrator)." -ForegroundColor Red
+    return $false
+  }
+  # 1. BACKUP FIRST, always, before anything changes
+  $stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
+  $backup = Join-Path $PSScriptRoot ("sentinel-audit-backup-" + $stamp + ".csv")
+  try {
+    & auditpol.exe /backup /file:$backup | Out-Null
+    Write-Host ("  [audit] backup written: " + $backup) -ForegroundColor Green
+  } catch {
+    Write-Host "  [audit] NOT ENABLED - the pre-change backup failed; nothing was modified." -ForegroundColor Red
+    return $false
+  }
+  # 2. what to change: every subcategory a rule needs that is not already set
+  $guids = Get-AuditSubcategoryGuids
+  $rules = @(Get-RuleCatalog)
+  $wanted = @{}   # subcategory -> flag ('/success:enable' and/or '/failure:enable')
+  foreach ($r in $rules) {
+    if ($r.auditState -eq 'n/a' -or $r.auditState -eq 'ok') { continue }
+    foreach ($sub in @("$($r.auditSubcategory)" -split ' \+ ')) {
+      if (-not $sub) { continue }
+      $cur = "$($Script:AuditState[$sub.ToLower()])"
+      $need = "$($r.auditRequired)"
+      if ($need -match 'Success' -and $cur -notmatch 'Success') {
+        if (-not $wanted.ContainsKey($sub)) { $wanted[$sub] = @() }
+        $wanted[$sub] += '/success:enable'
+      }
+      if ($need -match 'Failure' -and $cur -notmatch 'Failure') {
+        if (-not $wanted.ContainsKey($sub)) { $wanted[$sub] = @() }
+        $wanted[$sub] += '/failure:enable'
+      }
+    }
+  }
+  if ($wanted.Count -eq 0) {
+    Write-Host "  [audit] nothing to change - every subcategory the rules need is already enabled." -ForegroundColor Green
+    return $true
+  }
+  # 3. change, one subcategory at a time, never turning anything off
+  $changed = 0
+  Write-Host ""
+  Write-Host "  subcategory                          | before               | after"
+  Write-Host "  -------------------------------------+----------------------+----------------------"
+  foreach ($sub in ($wanted.Keys | Sort-Object)) {
+    $cur = "$($Script:AuditState[$sub.ToLower()])"
+    if ($cur -eq '' -or $cur -eq 'No Auditing') { $cur = 'No Auditing' }
+    $flags = @($wanted[$sub] | Select-Object -Unique)
+    $after = $cur
+    foreach ($f in $flags) {
+      # prefer the GUID: immune to localised subcategory names
+      $subArg = "/subcategory:$sub"
+      if ($guids.ContainsKey($sub.ToLower())) { $subArg = "/subcategory:$($guids[$sub.ToLower()])" }
+      if (Invoke-AuditpolSet $subArg $f) {
+        if ($f -eq '/success:enable' -and $after -notmatch 'Success') { if ($after -eq 'No Auditing') { $after = 'Success' } else { $after = "$after and Success" } }
+        if ($f -eq '/failure:enable' -and $after -notmatch 'Failure') { if ($after -eq 'No Auditing') { $after = 'Failure' } else { $after = "$after and Failure" } }
+      } else {
+        Write-Host ("  [audit] auditpol refused: " + $sub + " " + $f) -ForegroundColor Red
+      }
+    }
+    Write-Host ("  " + $sub.PadRight(37) + "| " + $cur.PadRight(20) + "| " + $after)
+    Write-AuditChange $sub $cur $after $backup
+    $changed++
+  }
+  Write-Host ("  [audit] " + $changed + " subcategory(ies) updated (only enabled; nothing was ever turned off).") -ForegroundColor Green
+  # 4. re-read so coverage and health update immediately, no restart
+  $null = Update-AuditPreflight
+  return $true
+}
+
+function Restore-SentinelAuditPolicy([string]$BackupFile) {
+  if (-not (Test-SentinelIsAdmin)) {
+    Write-Host "  [audit] RESTORE REFUSED - restoring the audit policy requires Administrator." -ForegroundColor Red
+    return $false
+  }
+  if (-not $BackupFile -or -not (Test-Path $BackupFile)) {
+    Write-Host ("  [audit] RESTORE REFUSED - backup file not found: " + $BackupFile) -ForegroundColor Red
+    return $false
+  }
+  & auditpol.exe /restore /file:$BackupFile
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host ("  [audit] policy restored from " + $BackupFile) -ForegroundColor Green
+    $null = Update-AuditPreflight
+    return $true
+  }
+  Write-Host "  [audit] auditpol /restore failed - see its output above." -ForegroundColor Red
+  return $false
+}
+
+# ============================================================
 # RUNTIME STATE - the poll watermark survives a restart
 # ============================================================
 # The old build hardcoded a 2-minute backfill on every start: restarting
@@ -3337,6 +3487,41 @@ function Write-AuthEvent([string]$Ip, [string]$UserName, [string]$Outcome, [stri
       $row | Export-Csv -Path $AuthFile -NoTypeInformation -Force -Encoding UTF8 -Append
     } else {
       $row | Export-Csv -Path $AuthFile -NoTypeInformation -Force -Encoding UTF8
+    }
+  } catch { }
+}
+
+# The last audit-policy change for /api/settings (read-only; subcategory,
+# before, after, backup path - never a credential).
+function Get-LastAuditChange {
+  try {
+    if (-not (Test-Path $AuditFile)) { return $null }
+    $rows = @(Import-Csv -Path $AuditFile | Select-Object -Last 1)
+    if ($rows.Count -eq 0) { return $null }
+    return [PSCustomObject]@{
+      at      = "$($rows[0].Time)"
+      subcategory = "$($rows[0].Subcategory)"
+      before  = "$($rows[0].Before)"
+      after   = "$($rows[0].After)"
+      backup  = "$($rows[0].Backup)"
+    }
+  } catch { return $null }
+}
+
+# ---- audit-policy change log (one row per subcategory changed) -------------
+function Write-AuditChange([string]$Subcategory, [string]$Before, [string]$After, [string]$BackupPath) {
+  try {
+    $row = [PSCustomObject]@{
+      Time        = (Get-Date).ToUniversalTime().ToString("o")
+      Subcategory = Protect-CsvCell $Subcategory
+      Before      = Protect-CsvCell $Before
+      After       = Protect-CsvCell $After
+      Backup      = Protect-CsvCell $BackupPath
+    }
+    if (Test-Path $AuditFile) {
+      $row | Export-Csv -Path $AuditFile -NoTypeInformation -Force -Encoding UTF8 -Append
+    } else {
+      $row | Export-Csv -Path $AuditFile -NoTypeInformation -Force -Encoding UTF8
     }
   } catch { }
 }
@@ -4480,6 +4665,12 @@ function Invoke-PollOnce {
 # MAIN - start web server, single-threaded request/poll loop
 # ============================================================
 
+# ---- -RestoreAudit: run auditpol /restore and exit --------------------------
+if ($RestoreAudit) {
+  $ok = Restore-SentinelAuditPolicy $RestoreAudit
+  exit $(if ($ok) { 0 } else { 1 })
+}
+
 # -ReplayPath: run exported event XML through the real engine, print the report
 # and exit. No web server and no history writes - this is the fixture harness
 # for field-shape bugs, the class of bug the synthetic self-test cannot see.
@@ -4508,6 +4699,35 @@ if ($Background) {
 
 # pid file, so `-Stop` / Stop-Sentinel can find this process from any console
 try { Set-Content -Path $PidFile -Value $PID -Encoding Ascii -Force } catch { }
+
+# ---- QuickEdit guard --------------------------------------------------------
+# Windows consoles default to QuickEdit: a click inside the console SELECTS
+# text, and a running program's stdout blocks until the selection is cleared.
+# A monitor frozen because somebody clicked the window looks exactly like a
+# dead one. Clear the flag on interactive start (and restore it on exit); in a
+# service/hidden console there is nothing to guard and the calls fail safe.
+$Script:SavedConsoleMode = -1
+$Script:ConsoleHandle = [IntPtr]::Zero
+try {
+  if (-not $Background -and -not ('Sentinel.ConsoleMode' -as [type])) {
+    Add-Type -Namespace Sentinel -Name ConsoleMode -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint mode);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint mode);
+'@
+  }
+  if (-not $Background -and ('Sentinel.ConsoleMode' -as [type])) {
+    $h = [Sentinel.ConsoleMode]::GetStdHandle(-10)   # STD_INPUT_HANDLE
+    $mode = [uint32]0
+    if ([Sentinel.ConsoleMode]::GetConsoleMode($h, [ref]$mode)) {
+      $Script:SavedConsoleMode = $mode
+      $Script:ConsoleHandle = $h
+      # ENABLE_QUICK_EDIT_MODE = 0x0040, ENABLE_EXTENDED_FLAGS = 0x0080
+      $newMode = ($mode -band (-bnot 0x0040)) -bor 0x0080
+      [void][Sentinel.ConsoleMode]::SetConsoleMode($h, $newMode)
+    }
+  }
+} catch { }
 
 # audit-policy preflight BEFORE the dashboard starts reporting healthy coverage
 $null = Update-AuditPreflight
@@ -4567,7 +4787,27 @@ if (-not $preflight.readable) {
   foreach ($b in $preflight.blind) {
     Write-Host ("                     - " + $b.key + " needs " + $b.need + " on '" + $b.subcategory + "'") -ForegroundColor Yellow
   }
-  foreach ($f in $preflight.fix) { Write-Host ("                     " + $f) -ForegroundColor DarkYellow }
+  # PowerShell-SAFE commands: pasted as-is, the whole /subcategory:"..." reaches
+  # auditpol as one argument instead of losing its inner quotes to PowerShell
+  foreach ($f in $preflight.fix) { Write-Host ("                     " + $f + "   # works when pasted: the quoted argument survives") -ForegroundColor DarkYellow }
+  Write-Host "                     or restart with -EnableAudit and the monitor sets them (with a backup first)."
+  # ---- opt-in prompt: interactive console + blind rules + no -EnableAudit ----
+  if ($EnableAudit) {
+    $null = Enable-SentinelAuditPolicy
+  } elseif (-not $Background -and [Environment]::UserInteractive) {
+    try {
+      Write-Host ""
+      Write-Host ("  " + $preflight.blindCount + " rules are blind. Enable the required audit policy now? [y/N] " -NoNewline) -ForegroundColor Yellow
+      $answer = $null
+      $deadline = (Get-Date).AddSeconds(15)
+      while ((Get-Date) -lt $deadline -and -not [Console]::KeyAvailable) { Start-Sleep -Milliseconds 150 }
+      if ([Console]::KeyAvailable) { $answer = [Console]::ReadKey($true).Key.ToString() }
+      Write-Host $(if ($answer -eq 'Y') { 'y' } else { 'N (default - nothing changed)' })
+      if ($answer -eq 'Y') { $null = Enable-SentinelAuditPolicy }
+    } catch {
+      Write-Host "  (no interactive console - skipping the audit-policy prompt)"
+    }
+  }
 } else {
   Write-Host ("   Audit preflight : all " + $preflight.okCount + " policy-gated rule families can fire (" + $preflight.naCount + " are not policy-gated).") -ForegroundColor Green
 }
@@ -4615,4 +4855,9 @@ try {
   Save-History
   Save-State
   Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+  try {
+    if ($Script:SavedConsoleMode -ge 0 -and $Script:ConsoleHandle -ne [IntPtr]::Zero) {
+      [void][Sentinel.ConsoleMode]::SetConsoleMode($Script:ConsoleHandle, [uint32]$Script:SavedConsoleMode)
+    }
+  } catch { }
 }
