@@ -524,6 +524,7 @@ $Script:ChannelMarks = @{}        # channel -> watermark (DateTime)
 $Script:ChannelLastSuccess = @{}  # channel -> last fully successful poll
 $Script:ChannelLastError = @{}    # channel -> last error message for that channel
 $Script:XPathFallback = @{}       # channel -> $true once the XPath pre-filter was rejected
+$Script:ChannelUnavailable = @{}  # channel -> $true when the OS has no such log (skipped forever, not an error)
 $Script:EvalErrors = 0            # events the rule engine threw on (skipped, not fatal)
 $Script:LastEvalError = ''
 $Script:PollErrors = 0            # failed channel queries (watermark left alone)
@@ -1148,8 +1149,15 @@ function Get-OverviewPayload {
   }
   if ($unknownCount -gt 0) {
     $noun = if ($unknownCount -eq 1) { 'family is' } else { 'families are' }
-    $reasons += [PSCustomObject]@{ code = 'unverified'; label = 'Unverified'
-      detail = "the audit policy could not be read, so $unknownCount rule $noun unverified" }
+    $noLog = @($unknown | Where-Object { "$($_.auditDetail)" -like 'log not present*' }).Count
+    $detail = if ($noLog -gt 0 -and $noLog -lt $unknownCount) {
+      "$noLog rule $noun on a log this OS does not have and $($unknownCount - $noLog) could not be verified - the audit policy was unreadable"
+    } elseif ($noLog -gt 0) {
+      "$noLog rule $noun on a log this OS does not have, so it cannot be confirmed"
+    } else {
+      "the audit policy could not be read, so $unknownCount rule $noun unverified"
+    }
+    $reasons += [PSCustomObject]@{ code = 'unverified'; label = 'Unverified'; detail = $detail }
   }
   if ($catch.catchingUp) {
     $reasons += [PSCustomObject]@{ code = 'catching-up'; label = 'Catching up'
@@ -2629,6 +2637,20 @@ function Export-AlertsCsv($path, $includeSelfTest = $false) {
 
 # The rule catalog + per-rule fired counts - what the dashboard's Detection
 # Coverage panel renders. Shape matches the web platform's GET /api/admin/rules.
+# Which channels write each monitored event id (from $LogSources). A rule whose
+# every channel is unavailable on this OS cannot be confirmed working - it is
+# 'unverified: log not present', not blind and not ok.
+function Get-ChannelForEventIds {
+  $map = @{}
+  foreach ($src in $LogSources) {
+    foreach ($id in @($src.Ids)) {
+      if (-not $map.ContainsKey([int]$id)) { $map[[int]$id] = @() }
+      $map[[int]$id] += "$($src.Log)"
+    }
+  }
+  return $map
+}
+
 function Get-RuleCatalog {
   $fired = @{}
   foreach ($a in $Script:Alerts) {
@@ -2641,11 +2663,31 @@ function Get-RuleCatalog {
     if (-not $fired[$a.RuleKey].Last -or $a.Time -gt $fired[$a.RuleKey].Last) { $fired[$a.RuleKey].Last = $a.Time }
   }
 
+  $chanMap = Get-ChannelForEventIds
   $list = @()
   foreach ($k in $RuleMeta.Keys) {
     $m = $RuleMeta[$k]
     $hit = $fired[$k]
     $audit = Get-RuleAuditState $k
+    # every channel this family's events are written to; 'unavailable' means the
+    # OS has no such log (marked by the poll loop)
+    $chanState = 'ok'
+    $ruleChannels = @()
+    foreach ($eid in @($m.EventIds)) {
+      $c = $chanMap[[int]$eid]
+      if ($c) { $ruleChannels += @($c) }
+    }
+    $ruleChannels = @($ruleChannels | Select-Object -Unique)
+    if ($ruleChannels.Count -gt 0 -and @($ruleChannels | Where-Object { $Script:ChannelUnavailable.ContainsKey($_) }).Count -eq $ruleChannels.Count) {
+      $chanState = 'unavailable'
+    }
+    if ($chanState -eq 'unavailable') {
+      # every channel that writes this family's events is absent from this OS:
+      # nobody can confirm the family works, so it is unverified (not blind -
+      # nothing is misconfigured - and not ok)
+      $audit = [PSCustomObject]@{ state = 'unknown'; subcategory = $audit.subcategory; need = $audit.need
+        detail = 'log not present on this OS - skipped, so this family is unverified rather than blind' }
+    }
     $list += [PSCustomObject]@{
       key           = $k
       title         = $m.Title
@@ -4215,6 +4257,20 @@ function Get-ChannelFilterXml($channel, $ids, $since) {
 # If the provider rejects the XPath (it can, on a differently-patched DC) the
 # channel falls back to the plain Id filter and remembers, so the failing query
 # is not paid for on every poll.
+# Classify a Get-WinEvent failure by its FullyQualifiedErrorId - NEVER by the
+# message text, which is localised. Seen on the real Server 2012 R2 lab box:
+#   NoMatchingEventsFound*  nothing matched the filter: an IDLE channel, which
+#                           is the normal state of a quiet network, not an error
+#   NoMatchingLogsFound*    the channel does not exist on this OS (Defender's
+#                           Operational log is absent on Server 2012 R2)
+function Get-WinEventErrorKind($err) {
+  $id = ""
+  if ($err -and $err.FullyQualifiedErrorId) { $id = "$($err.FullyQualifiedErrorId)" }
+  if ($id -like 'NoMatchingEventsFound*') { return 'no-events' }
+  if ($id -like 'NoMatchingLogsFound*') { return 'no-log' }
+  return 'real'
+}
+
 function Get-ChannelEvents($channel, $ids, $since, $cap = 0) {
   # Read OLDEST-first and only one page (cap + 1) per poll, so a poll reads what
   # it is going to process instead of materialising a whole backlog every time.
@@ -4231,17 +4287,36 @@ function Get-ChannelEvents($channel, $ids, $since, $cap = 0) {
       }
       return @{ Events = $events; UsedXPath = $true }
     } catch {
+      $kind = Get-WinEventErrorKind $_
+      if ($kind -eq 'no-events') {
+        # a channel with no matching events is IDLE, not broken: Get-WinEvent
+        # throws for it, but treating that as an error flipped XPathFallback on
+        # every idle poll and drove the health pill red on a healthy box
+        return @{ Events = @(); UsedXPath = $true; Idle = $true }
+      }
+      if ($kind -eq 'no-log') {
+        # the channel itself does not exist on this OS - hand the decision to
+        # the poll loop, which marks it unavailable exactly once
+        return @{ Events = @(); UsedXPath = $true; NoLog = $true }
+      }
       $Script:XPathFallback[$channel] = $true
       $Script:ChannelLastError[$channel] = "XPath pre-filter rejected: $($_.Exception.Message)"
       Write-Host ("  [poll] " + $channel + ": XPath pre-filter not accepted - using the plain Id filter from now on.") -ForegroundColor DarkYellow
     }
   }
-  if ($max -gt 0) {
-    $events = @(Get-WinEvent -FilterHashtable @{ LogName = $channel; Id = $ids; StartTime = $since } -Oldest -MaxEvents $max -ErrorAction Stop)
-  } else {
-    $events = @(Get-WinEvent -FilterHashtable @{ LogName = $channel; Id = $ids; StartTime = $since } -ErrorAction Stop)
+  try {
+    if ($max -gt 0) {
+      $events = @(Get-WinEvent -FilterHashtable @{ LogName = $channel; Id = $ids; StartTime = $since } -Oldest -MaxEvents $max -ErrorAction Stop)
+    } else {
+      $events = @(Get-WinEvent -FilterHashtable @{ LogName = $channel; Id = $ids; StartTime = $since } -ErrorAction Stop)
+    }
+    return @{ Events = $events; UsedXPath = $false }
+  } catch {
+    $kind = Get-WinEventErrorKind $_
+    if ($kind -eq 'no-events') { return @{ Events = @(); UsedXPath = $false; Idle = $true } }
+    if ($kind -eq 'no-log') { return @{ Events = @(); UsedXPath = $false; NoLog = $true } }
+    throw
   }
-  return @{ Events = $events; UsedXPath = $false }
 }
 
 # Process one channel's batch: oldest-first, capped, with a try/catch PER EVENT.
@@ -4320,9 +4395,19 @@ function Invoke-PollOnce {
 
   foreach ($source in $LogSources) {
     $channel = $source.Log
+    if ($Script:ChannelUnavailable.ContainsKey($channel)) { continue }   # marked once, skipped after
     $since = Get-ChannelMark $channel
     try {
       $query = Get-ChannelEvents $channel $source.Ids $since $MaxEventsPerPoll
+      if ($query.NoLog) {
+        # this OS has no such log: say so ONCE, then skip the channel on every
+        # later poll - it must not count as lag, as an error, or in health
+        $Script:ChannelUnavailable[$channel] = $true
+        $Script:ChannelMarks.Remove($channel)   # a stale mark would poison the lag
+        Write-Host ("  [poll] " + $channel + ": log not present on this OS - skipped") -ForegroundColor Yellow
+        $Script:ChannelLastError[$channel] = ''
+        continue
+      }
       $batch = Invoke-ChannelBatch $channel $query.Events $MaxEventsPerPoll
 
       # The query AND the processing both completed, so the mark may move.

@@ -224,9 +224,24 @@ try {
   # Invoke-PollOnce runs unmodified against scripted events.
   $script:FakeEvents = @()
   $script:FakeFailChannels = @()
+  $script:FakeIdleChannels = @()
+  $script:FakeMissingChannels = @()
   $script:FakeFailXml = $false
   $script:FakeCalls = @()
   $script:FakeParams = @()
+
+  # Build an ErrorRecord with the FullyQualifiedErrorId the REAL cmdlet uses -
+  # the fix must match on the id (localisation-proof), so the fake must carry it
+  function New-FakeWinEventError([string]$Kind, [string]$Message) {
+    $id = switch ($Kind) {
+      'no-events' { 'NoMatchingEventsFound,Microsoft.PowerShell.Commands.GetWinEventCommand' }
+      'no-log'    { 'NoMatchingLogsFound,Microsoft.PowerShell.Commands.GetWinEventCommand' }
+      default     { ' InvalidOperationException,Microsoft.PowerShell.Commands.GetWinEventCommand' }
+    }
+    $ex = New-Object System.InvalidOperationException($Message)
+    $err = New-Object System.Management.Automation.ErrorRecord($ex, $id, [System.Management.Automation.ErrorCategory]::InvalidOperation, $null)
+    return $err
+  }
 
   function Get-WinEvent {
     [CmdletBinding()]
@@ -243,8 +258,17 @@ try {
       if ($FilterXml -match "SystemTime&gt;='([^']+)'") { $sinceFromXml = [datetime]$Matches[1] }
     }
     $script:FakeParams += [PSCustomObject]@{ Kind = $kind; Channel = $channel; Oldest = [bool]$Oldest; MaxEvents = $MaxEvents }
-    if ($script:FakeFailXml -and $kind -eq 'FilterXml') { throw "fake provider rejected the XPath" }
-    if ($channel -and ($script:FakeFailChannels -contains $channel)) { throw "fake log '$channel' unavailable" }
+    if ($script:FakeFailXml -and $kind -eq 'FilterXml') { throw (New-FakeWinEventError 'real' "fake provider rejected the XPath") }
+    if ($channel -and ($script:FakeFailChannels -contains $channel)) { throw (New-FakeWinEventError 'real' "fake log '$channel' unavailable") }
+    # the two REAL Get-WinEvent shapes seen on the 2012 R2 lab box: an idle
+    # channel throws NoMatchingEventsFound, a missing log throws
+    # NoMatchingLogsFound - both with their real FullyQualifiedErrorId
+    if ($channel -and ($script:FakeIdleChannels -contains $channel)) {
+      throw (New-FakeWinEventError 'no-events' "No events were found that match the specified selection criteria.")
+    }
+    if ($channel -and ($script:FakeMissingChannels -contains $channel)) {
+      throw (New-FakeWinEventError 'no-log' "There is not an event log on the localhost computer that matches 'Microsoft-Windows-Windows Defender/Operational'.")
+    }
 
     $since = $sinceFromXml
     $ids = @()
@@ -1958,6 +1982,55 @@ try {
   Assert-True ($printCss.Contains('page-break')) 'with page breaks between sections'
 
   Write-Host ""
+  Write-Host ""
+  Write-Host "== v2.4.1 part 1: an idle poll is not an error ==" -ForegroundColor Cyan
+
+  # --- an idle channel: no events, no error, no fallback, watermark moves ---
+  Reset-Engine
+  $script:FakeIdleChannels = @('Security')
+  $marksBefore = $Script:ChannelMarks['Security']
+  $r1 = Invoke-PollOnce
+  Assert-True ($r1.Ok) 'an idle poll is Ok (NoMatchingEventsFound is not an error)'
+  Assert-True ($Script:XPathFallback['Security'] -ne $true) 'an idle poll does NOT flip XPathFallback'
+  Assert-True ($Script:PollErrors -eq 0) 'an idle poll does not count as a poll error'
+  Assert-True ($null -ne $Script:ChannelMarks['Security'] -and $Script:ChannelMarks['Security'] -ne $marksBefore) 'the watermark advanced past the idle poll'
+  Assert-True ($Script:LagSeconds -lt 120) 'an idle poll does not grow the lag'
+  $ov1 = Get-OverviewPayload
+  Assert-True ($ov1.health.state -ne 'degraded' -or (@($ov1.health.reasons | Where-Object { $_.code -eq 'eval-errors' -or $_.code -eq 'lag' }).Count -eq 0)) 'health does not degrade from an idle poll'
+  $script:FakeIdleChannels = @()
+
+  # --- a channel this OS does not have: one line, then skipped forever ------
+  Reset-Engine
+  $script:FakeMissingChannels = @('Microsoft-Windows-Windows Defender/Operational')
+  $r2 = Invoke-PollOnce
+  Assert-True ($Script:ChannelUnavailable.ContainsKey('Microsoft-Windows-Windows Defender/Operational')) 'the missing channel is marked unavailable'
+  Assert-True ($Script:ChannelUnavailable.Count -eq 1) 'and only that channel'
+  $defenderCalls = { @($script:FakeParams | Where-Object { $_.Channel -eq 'Microsoft-Windows-Windows Defender/Operational' }).Count }
+  $before = & $defenderCalls
+  $r3 = Invoke-PollOnce
+  Assert-True ((& $defenderCalls) -eq $before) 'a marked channel is never queried again (skipped on later polls)'
+  Assert-True ($Script:PollErrors -eq 0) 'a missing log is not a poll error'
+  # lag excludes the unavailable channel: only Security and System marks remain
+  $r3 = Invoke-PollOnce
+  Assert-True ($r3.Ok) 'and the poll is still Ok with the channel gone'
+  # rules that read ONLY that channel are unverified, never blind
+  $cat = @(Get-RuleCatalog)
+  $defenderRules = @($cat | Where-Object { @($_.eventIds) -contains 5001 })
+  Assert-True ($defenderRules.Count -ge 1) 'the Defender-only rule family is in the catalog'
+  Assert-True ($defenderRules[0].auditState -eq 'unknown') 'a rule whose every channel is unavailable is unverified'
+  Assert-True ("$($defenderRules[0].auditDetail)" -like 'log not present*') 'with the log-not-present detail'
+  $script:FakeMissingChannels = @()
+
+  # --- a REAL failure still counts ------------------------------------------
+  Reset-Engine
+  $script:FakeFailChannels = @('Security')
+  $errorsBefore = $Script:PollErrors
+  $r4 = Invoke-PollOnce
+  Assert-True (-not $r4.Ok) 'a real failure (access denied) is an error'
+  Assert-True ($Script:PollErrors -gt $errorsBefore) 'and it counts in pollErrors'
+  Assert-True ($Script:XPathFallback['Security'] -eq $true) 'a real XPath rejection still flips the fallback'
+  $script:FakeFailChannels = @()
+
   Write-Host "== fixture replay ==" -ForegroundColor Cyan
   $manifestPath = Join-Path $Fixtures 'expected.json'
   if (-not (Test-Path $manifestPath)) { throw "cannot find $manifestPath" }
