@@ -89,6 +89,9 @@ log) or **5001 / 5010 / 5012** (the Defender **Operational** channel).
 **3. Run it:**
 
 ```powershell
+# one step instead of the manual auditpol list (backs up first, only enables):
+powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -EnableAudit
+
 # background (no console window); writes sentinel.pid
 powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -Background
 
@@ -96,7 +99,9 @@ powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -Background
 powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1
 ```
 
-Then open **http://localhost:8443** and sign in. Stop it from any console:
+Then open **http://localhost:8443** and sign in - plain **http://**: the
+listener serves no TLS, so an **https://** URL will not connect. Encryption
+comes from a TLS reverse proxy or a VPN. Stop it from any console:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -Stop
@@ -114,6 +119,8 @@ Optional flags:
 | `-CatchUpMilliseconds` | 200 | when a poll was capped, retry this soon instead of a whole `-PollSeconds` |
 | `-Background` | off | hide the console window |
 | `-Stop` | - | stop a running background monitor and exit |
+| `-EnableAudit` | off | set the audit subcategories the rules need: backs the policy up first (`sentinel-audit-backup-<timestamp>.csv`), only ever ENABLES what a rule needs, is idempotent, refuses without Administrator. Undo with `-RestoreAudit <that backup>` |
+| `-RestoreAudit <file>` | - | restore an audit-policy backup (`auditpol /restore`) and exit |
 | `-ForwardUrl` / `-ForwardKey` | - | forward detections to the ALPHA web platform |
 | `-HistoryFile` | `sentinel-history.csv` | alert history |
 | `-StateFile` | `sentinel-state.json` | per-channel poll watermarks |
@@ -208,7 +215,7 @@ with the page. That is replaced by a real login:
   both completed, so a slow or failing channel can neither hold back nor skip
   past the others.
 - **Per-event error isolation** - a malformed event is counted
-  (`/api/status` → `evalErrors`) and skipped; it cannot abort the rest of the
+  (`/api/status` -> `evalErrors`) and skipped; it cannot abort the rest of the
   batch. A failed log read leaves that channel's watermark untouched and is
   retried next poll, so nothing is silently lost.
 - **Backlog catch-up** - a capped poll re-polls in `-CatchUpMilliseconds`
@@ -369,7 +376,7 @@ event log, no HTTP and no network needed - by a runner that drives the same
 functions the live monitor uses:
 
 ```powershell
-.\tests\run-tests.ps1      # 757 assertions, exit code 1 on any failure
+.\tests\run-tests.ps1      # 816 assertions, exit code 1 on any failure
 ```
 
 It covers detection behaviour in both directions, dedupe-per-entity, the
@@ -398,8 +405,12 @@ health pill) and the v2.4 round (the health reasons and the aborted-fetch silenc
 assets maps and their caps and eviction, DN stripping, `::ffff:` normalisation, the
 internal flag, and every assets/sort/filter/paging boundary; the chain grouping, its
 hash id and kill-chain ordering; and the report's period validation, its sections and
-its secret-free guarantee), then replays all 19 fixtures in `tests/fixtures/`. See
-`tests/README.md`.
+its secret-free guarantee), the v2.4.1 round (an idle poll is not an error and a
+missing log is skipped, not degraded; the audit-policy setup's admin refusal, safe
+one-argument invocation, backup-first ordering, idempotence and restore; the exact
+alertCount arithmetic on hosts, IPs and accounts; and that a shared destination
+host no longer merges chains), then replays all 19 fixtures in `tests/fixtures/`.
+See `tests/README.md`.
 
 ## Forwarding to the web platform
 

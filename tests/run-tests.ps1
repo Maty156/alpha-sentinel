@@ -1553,9 +1553,9 @@ try {
   Assert-True ($raw.Contains('if ($null -eq $i) { continue }')) 'and a null element is skipped rather than serialised'
 
   # --- 6. polish -----------------------------------------------------------
-  Assert-True ($Script:SentinelVersion -eq '2.4.0') 'the version is 2.4.0'
-  Assert-True ($raw.Contains('ALPHA SENTINEL v2.4.0')) 'the script header says v2.4.0'
-  Assert-True ($raw.Contains('ALPHA SENTINEL v2.4.0 - AD / Network Attack Monitor')) 'and so does the startup banner'
+  Assert-True ($Script:SentinelVersion -eq '2.4.1') 'the version is 2.4.1'
+  Assert-True ($raw.Contains('ALPHA SENTINEL v2.4.1')) 'the script header says v2.4.1'
+  Assert-True ($raw.Contains('ALPHA SENTINEL v2.4.1 - AD / Network Attack Monitor')) 'and so does the startup banner'
 
   # account names, not distinguished names
   Assert-True ((ConvertTo-AccountName 'CN=attacker,OU=Corp,DC=example,DC=local') -eq 'attacker') 'a DN is trimmed to the account'
@@ -2142,6 +2142,15 @@ exit 1
 
   Reset-Engine
   $null = Update-AuditPreflight
+  # pin the starting policy: the state file may have been touched by nothing
+  # yet, but resetting it here makes the wanted-set deterministic regardless of
+  # how earlier sections of this run evaluated
+  Set-Content -Path (Join-Path $fakeDir 'auditpol-state.txt') -Value @(
+    'logon|No Auditing'
+    'user account management|No Auditing'
+    'security group management|Success'
+    'credential validation|Success and Failure'
+  )
   $before = @(Get-Content $callsLog | Where-Object { $_ -like '*/set*' }).Count
   Assert-True (Invoke-AuditEnable) 'the admin path runs against the fake auditpol'
   $setArgs = @(Get-Content $callsLog | Where-Object { $_ -like '*/set*' })
@@ -2158,9 +2167,13 @@ exit 1
   }) | Where-Object { $_ }
   Assert-True ($setSubs -contains 'logon') 'the blind Logon subcategory was set'
   Assert-True ($setSubs -notcontains 'security group management') 'a working subcategory is left alone'
-  $logonRows = @($setArgs | Where-Object { $_ -like '*subcategory:*Logon*' })
-  Assert-True (@($logonRows | Where-Object { $_ -like '*failure:enable*' }).Count -ge 1) 'Logon was enabled for failure (what its rules need)'
-  Assert-True (@($logonRows | Where-Object { $_ -like '*success:enable*' }).Count -ge 1) 'and for success (account_lockout_storm needs it)'
+  # match the subcategory as a whole argument: '*Logon*' would also match
+  # 'Special Logon'. The spec fact is the END STATE: Logon audits both halves.
+  # Assert it against the fake's state file (what a real /get would show), not
+  # against the set-call order - the two flags are independent /set calls and
+  # which earlier sections ran first must not matter.
+  # (the end-state assertions live after the second enable below: the spec is
+  # that after enabling, Logon audits both halves - whichever run set which)
   # the state file shows nothing was ever DISABLED
   $stateNow = @(Get-Content (Join-Path $fakeDir 'auditpol-state.txt'))
   Assert-True (@($stateNow | Where-Object { $_ -like 'credential validation*|Success and Failure' }).Count -eq 1) 'an already-full subcategory is untouched'
@@ -2173,6 +2186,14 @@ exit 1
   # has an empty wanted-set (the real function prints 'nothing to change' then)
   $blindAfter = @(@(Get-RuleCatalog) | Where-Object { $_.auditState -eq 'blind' })
   Assert-True ($blindAfter.Count -eq 0) ('a second run has nothing left to change (blind families: ' + $blindAfter.Count + ')')
+  # the end state, after both runs: Logon audits Success AND Failure - the
+  # whole point of -EnableAudit
+  $logonState = ''
+  foreach ($line in @(Get-Content (Join-Path $fakeDir 'auditpol-state.txt'))) {
+    if ("$line" -match '^logon\|(.+)$') { $logonState = $Matches[1] }
+  }
+  Assert-True ("$logonState" -match 'Success') 'Logon ends auditing Success (account_lockout_storm needs it)'
+  Assert-True ("$logonState" -match 'Failure') 'Logon ends auditing Failure (what the brute-force rules need)'
   # /backup ran before any /set
   $backupIdx = -1; $firstSet = -1
   $all = @(Get-Content $callsLog)

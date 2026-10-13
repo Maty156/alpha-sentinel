@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-# ALPHA SENTINEL v2.4.0 - AD / Network Attack Monitor (background service + web UI)
+# ALPHA SENTINEL v2.4.1 - AD / Network Attack Monitor (background service + web UI)
 # ============================================================================
 # A standalone Windows security monitor from the ALPHA Cybersecurity project.
 # Like Wazuh's agent+dashboard model, but as ONE script with zero dependencies:
@@ -1959,7 +1959,7 @@ $Script:MaxBodyStalls = 3       # stalls from one address before it is blocked
 $Script:BodyStalls = @{}        # ip -> stalls seen (in-memory, per process)
 
 # ---- ALPHA SENTINEL version ------------------------------------------------
-$Script:SentinelVersion = '2.4.0'
+$Script:SentinelVersion = '2.4.1'
 # true only when the operator started the monitor with -DemoData: the dashboard
 # then labels itself as a demo instead of pretending the numbers are real
 $Script:DemoData = [bool]$DemoData
@@ -4751,7 +4751,7 @@ if ($usersState.ok) {
 
 Write-Host ""
 Write-Host "  ============================================================" -ForegroundColor Red
-Write-Host "   ALPHA SENTINEL v2.4.0 - AD / Network Attack Monitor" -ForegroundColor Red
+Write-Host "   ALPHA SENTINEL v2.4.1 - AD / Network Attack Monitor" -ForegroundColor Red
 Write-Host "  ============================================================" -ForegroundColor Red
 if ($listener) {
   if (-not $Bind -or $Bind -eq 'localhost' -or $Bind -eq '127.0.0.1') {
@@ -4797,7 +4797,7 @@ if (-not $preflight.readable) {
   } elseif (-not $Background -and [Environment]::UserInteractive) {
     try {
       Write-Host ""
-      Write-Host ("  " + $preflight.blindCount + " rules are blind. Enable the required audit policy now? [y/N] " -NoNewline) -ForegroundColor Yellow
+      Write-Host ("  " + $preflight.blindCount + " rules are blind. Enable the required audit policy now? [y/N] ") -NoNewline -ForegroundColor Yellow
       $answer = $null
       $deadline = (Get-Date).AddSeconds(15)
       while ((Get-Date) -lt $deadline -and -not [Console]::KeyAvailable) { Start-Sleep -Milliseconds 150 }

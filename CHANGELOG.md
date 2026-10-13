@@ -1,5 +1,56 @@
 ﻿# Changelog
 
+## v2.4.1
+
+Review fixes and lab-box behaviour, no new detection features. **816 assertions**
+(`tests/run-tests.ps1`), up from 757.
+
+### Part 1 - an idle poll is not an error, and a missing log is skipped
+
+Seen on the real Server 2012 R2 lab box: `Get-WinEvent -ErrorAction Stop` THROWS
+when nothing matches (`NoMatchingEventsFound`), and a channel that does not
+exist on the OS throws `NoMatchingLogsFound` (Defender's Operational log is
+absent on Server 2012 R2). Both were treated as poll errors: every idle poll
+flipped the XPath fallback, logged a red error, froze the watermark and grew
+the lag until health degraded. Now the error is classified by its
+FullyQualifiedErrorId (never the localised message): an idle channel returns an
+empty result with the watermark still advancing; a missing log is announced
+once, skipped from then on, and excluded from lag, pollErrors and health; only
+real failures count as errors. A rule whose every channel is missing reads as
+"unverified: log not present" - not blind, not ok.
+
+### Part 2 - audit-policy setup (opt-in) + console safety
+
+`-EnableAudit` sets the subcategories the rules need: it refuses without
+Administrator, backs the policy up first, passes the whole
+`/subcategory:"..."` (or the subcategory GUID) as ONE argument so it survives
+PowerShell's quote-stripping, only ever enables, is idempotent, prints a
+before/after table and logs each change. `-RestoreAudit <file>` runs
+`auditpol /restore`. On interactive startup with blind rules it asks once
+(default No, 15 s timeout). `/api/settings` shows the last audit change.
+The QuickEdit console flag is cleared (and restored on exit) so a click in the
+console can no longer freeze the monitor.
+
+### Part 3 - the v2.4 review fixes
+
+1. The Reports page's From/To/Generate/Print controls actually render above the
+   report (the load callback used to wipe them), and print layout flows: only
+   the top-alerts and appendix tables start a new page, so an 11-alert report
+   prints in 4 pages instead of 8.
+2. `alertCount` no longer doubles on hosts and IPs (N alerts = N, tested on
+   host, IP and account).
+3. Attack chains no longer merge alerts that merely share a destination host;
+   the link is a shared account or a shared source IP inside the 60-minute
+   window, and the host stays an entity/label on the chain.
+4. Chains layout: 11 tactic columns at >= 150px in a horizontal scroller, no
+   mid-word breaks, topbar title/subtitle wrap, one-line DEMO DATA pill.
+5. `::ffff:` normalised in `host.ips`; asset drawer alert links read
+   "#id - title (severity)"; the report's by-severity table sorts
+   Critical, High, Medium, Low; spacing between report headings and bodies.
+
+Every changed page was rendered in chromium from real endpoint payloads
+(screen and print) and the screenshots reviewed before committing.
+
 ## v2.4.0
 
 Assets, Attack Chains and Reports, plus two v2.3.1 leftovers. **757 assertions**
