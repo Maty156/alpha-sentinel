@@ -42,6 +42,7 @@
 
 /* attack chains - the left list and the 11-step kill-chain strip */
 .chains-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: var(--s-3); align-items: start; }
+.chains-scroller { overflow-x: auto; padding-bottom: 4px; }
 .chains-list { display: flex; flex-direction: column; gap: 6px; }
 .chains-item {
   text-align: left; width: 100%; background: var(--bg-1); border: 1px solid var(--line);
@@ -49,7 +50,10 @@
 }
 .chains-item:hover { border-color: var(--line-2); }
 .chains-item.on { border-color: var(--brand); background: var(--brand-soft); }
-.chain-strip { display: grid; grid-template-columns: repeat(11, minmax(0, 1fr)); gap: 5px; }
+.chain-strip { display: grid; grid-template-columns: repeat(11, minmax(150px, 1fr)); gap: 5px; min-width: 1720px; }
+/* tactic cells never break a word: the strip scrolls horizontally instead */
+.chain-cell { overflow: hidden; }
+.chain-name, .chain-alerts li { overflow-wrap: normal; word-break: normal; hyphens: none; }
 .chain-cell {
   background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
   padding: 7px 6px; min-height: 150px;
@@ -60,14 +64,14 @@
 .chain-name { font-size: 10.5px; line-height: 1.2; min-height: 26px; color: var(--text-mute); }
 .chain-cell.lit .chain-name { color: var(--text); }
 .chain-alerts { list-style: none; margin: 5px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
-.chain-alerts li { font-size: 10.5px; line-height: 1.25; overflow-wrap: anywhere; word-break: break-word; }
+.chain-alerts li { font-size: 11px; line-height: 1.25; }
 .chain-alerts a { display: block; text-decoration: none; }
 .chain-alerts a:hover { text-decoration: underline; }
 @media (max-width: 1400px) {
   .chains-layout { grid-template-columns: 1fr; }
-  .chain-strip { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
-@media (max-width: 900px) { .chain-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+/* the strip keeps one row of 11 at every width: the scroller scrolls, the
+   columns never reflow (a kill chain that wraps is not a kill chain) */
 
 /* sortable table headers */
 table.data th.sortable { cursor: pointer; user-select: none; }
@@ -77,3 +81,12 @@ table.data th.sortable:hover { color: var(--text); }
 .report-findings { display: flex; flex-direction: column; gap: 4px; }
 .report-sub { margin: 8px 0 2px; font-size: var(--fs-cap); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-mute); }
 .report-findings table.data { margin-bottom: 4px; }
+
+/* report: breathing room between a section heading and its body */
+.report-section h2 { margin-bottom: 10px; }
+
+/* the topbar title/subtitle wrap instead of clipping */
+.topbar-title h1, .topbar-title .page-sub { overflow-wrap: anywhere; white-space: normal; }
+
+/* the demo marker stays on one line */
+#demoPill { white-space: nowrap; }

@@ -47,7 +47,7 @@
     if (overview && overview.demoData) {
       host.hidden = false;
       S.ui.clear(host);
-      host.appendChild(S.ui.pill('pill-brand', 'LAB CONNECTED - DEMO DATA', 'started with -DemoData'));
+      host.appendChild(S.ui.pill('pill-brand', 'DEMO DATA', 'started with -DemoData'));
     } else {
       host.hidden = true;
       S.ui.clear(host);

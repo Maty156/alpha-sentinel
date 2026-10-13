@@ -43,7 +43,7 @@
     S.ui.clear(view);
     if (errorMsg) { view.appendChild(S.ui.error(errorMsg)); return; }
     if (!chains.length) {
-      view.appendChild(S.ui.empty('No multi-step activity detected.', 'Chains appear when two or more open alerts share an account, host or source IP within an hour.'));
+      view.appendChild(S.ui.empty('No multi-step activity detected.', 'Chains appear when two or more open alerts share an account or a source IP within an hour.'));
       return;
     }
     var wrap = S.ui.el('div', { class: 'chains-layout' });
@@ -57,13 +57,15 @@
     });
     var right = S.ui.el('div', { class: 'chains-detail' });
     var c = selected || chains[0];
+    var scroller = S.ui.el('div', { class: 'chains-scroller' });
+    scroller.appendChild(strip(c));
     right.appendChild(S.ui.el('div', { class: 'card' }, [
       S.ui.el('div', { class: 'card-head' }, [
         S.ui.el('h2', { text: c.title }),
         S.ui.el('span', { class: 'grow spacer' }),
         S.ui.el('span', { class: 'caption', text: 'kill-chain order, earliest tactic first' })
       ]),
-      S.ui.el('div', { class: 'card-body' }, [strip(c)])
+      S.ui.el('div', { class: 'card-body' }, [scroller])
     ]));
     wrap.appendChild(list);
     wrap.appendChild(right);

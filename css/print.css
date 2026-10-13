@@ -19,7 +19,13 @@
   .report-header { border-bottom: 2px solid #000; padding-bottom: 6mm; margin-bottom: 6mm; }
   .report-header h1 { color: #000; font-size: 18pt; }
   .report-meta { color: #333; font-size: 9pt; margin-top: 2mm; }
-  .report-section { page-break-inside: avoid; page-break-after: always; }
+  /* Sections flow one after another: forcing a break around every section made
+     an 11-alert report 8 pages with page 1 almost empty. Only the two big
+     tables (top alerts, the appendix timeline) start on a fresh page; rows
+     stay intact but sections themselves flow. */
+  .report-section { page-break-inside: auto; }
+  .report-section:has(.report-timeline),
+  .report-section:has(.report-topalerts) { page-break-before: always; }
   .report-section:last-child { page-break-after: auto; }
   .report-section h2 { font-size: 13pt; border-bottom: 1px solid #999; padding-bottom: 2mm; }
   .report-exec { font-size: 11pt; }

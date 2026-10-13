@@ -141,12 +141,17 @@
     body.appendChild(detail(a));
 
     var links = S.ui.el('div', {}, [S.ui.el('h2', { text: 'Open alerts on this ' + current.kind })]);
+    var known = {};
+    (S.state.get('alerts') || []).forEach(function (r) { known[String(r.Id)] = r; });
     var ids = (current.kind === 'host') ? (a.openAlerts || []) : [];
     if (ids.length) {
       var ul = S.ui.el('ul', { class: 'timeline' });
       ids.forEach(function (id) {
+        var row = known[String(id)];
+        var label = row ? ('#' + id + ' - ' + row.Title + ' (' + row.Severity + ')')
+                        : ('Alert #' + id + ' - open in Alerts');
         var li = S.ui.el('li', {});
-        var link = S.ui.el('a', { href: '#/alerts', class: 'cell-strong', text: 'Alert #' + id + ' - open in Alerts' });
+        var link = S.ui.el('a', { href: '#/alerts', class: 'cell-strong', text: label });
         link.addEventListener('click', function () {
           try { window.sessionStorage.setItem('sentinel-open-alert', String(id)); } catch (e) { }
         });

@@ -53,7 +53,12 @@
   }
 
   function render(view, r) {
+    /* The load() callback re-renders when the report arrives; if it only drew
+       the document, the controls built by the first render() would be wiped by
+       S.ui.clear and the page would keep only the search box. So the controls
+       are rebuilt here, above the document, on EVERY render. */
     S.ui.clear(view);
+    view.appendChild(controls());
     var doc = S.ui.el('div', { class: 'report-doc' });
     var gen = r.generatedAt ? String(r.generatedAt).replace('T', ' ').slice(0, 16) : '';
     doc.appendChild(S.ui.el('div', { class: 'report-header' }, [
@@ -73,7 +78,10 @@
 
     /* three labelled groups: one unlabelled table mixing severities, statuses and
        tactics reads as if "New" were a severity. Each group keeps its own head. */
-    var sevRows = Object.keys(r.summary.bySeverity || {}).map(function (k) { return [k, r.summary.bySeverity[k]]; });
+    var SEV_ORDER = { Critical: 0, High: 1, Medium: 2, Low: 3 };
+    var sevRows = Object.keys(r.summary.bySeverity || {}).sort(function (a, b) {
+      return (SEV_ORDER[a] === undefined ? 9 : SEV_ORDER[a]) - (SEV_ORDER[b] === undefined ? 9 : SEV_ORDER[b]);
+    }).map(function (k) { return [k, r.summary.bySeverity[k]]; });
     var statusRows = Object.keys(r.summary.byStatus || {}).map(function (k) { return [k, r.summary.byStatus[k]]; });
     var tacRows = Object.keys(r.summary.byTactic || {}).map(function (k) { return [k, r.summary.byTactic[k]]; });
     var findWrap = S.ui.el('div', { class: 'report-findings' });
@@ -91,7 +99,9 @@
           return [String(a.Time || '').replace('T', ' ').slice(0, 16), a.Severity, a.Title, a.Host || '-', a.Account || '-', a.Status || 'New'];
         }))
       : S.ui.el('p', { class: 'report-limitations', text: 'No alerts in this period.' });
-    doc.appendChild(section('Top alerts', topNode));
+    var topSec = section('Top alerts', topNode);
+    topSec.classList.add('report-topalerts');
+    doc.appendChild(topSec);
 
     var chainNode;
     if (!(r.chains || []).length) { chainNode = S.ui.el('p', { class: 'report-limitations', text: 'No multi-step activity detected in this period.' }); }
@@ -121,7 +131,9 @@
           return [String(a.Time || '').replace('T', ' ').slice(0, 16), a.Severity, a.Title, a.Host || '-', a.Account || '-', a.Status || 'New'];
         }))
       : S.ui.el('p', { class: 'report-limitations', text: 'No alerts in this period.' });
-    doc.appendChild(section('Appendix - alert timeline', tlNode));
+    var tlSec = section('Appendix - alert timeline', tlNode);
+    tlSec.classList.add('report-timeline');
+    doc.appendChild(tlSec);
     view.appendChild(doc);
   }
 
@@ -160,12 +172,12 @@
     subtitle: 'A printable engagement report generated from observed data only.',
     render: function () {
       var view = document.getElementById('view');
-      S.ui.clear(view);
-      view.appendChild(controls());
       if (report) { render(view, report); }
       else {
-        var d = defaults();
+        S.ui.clear(view);
+        view.appendChild(controls());
         view.appendChild(S.ui.el('div', { class: 'state no-print' }, [S.ui.el('div', { class: 'state-title', text: 'Pick a range and generate the report.' })]));
+        var d = defaults();
         load(d.from, d.to);
       }
     },

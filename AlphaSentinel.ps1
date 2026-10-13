@@ -989,7 +989,7 @@ function Update-HostSeen($fields, [bool]$isAlert) {
       $rec.users = $users
     }
   }
-  $ip = "$($fields.sourceIp)"
+  $ip = Get-NormalisedIp "$($fields.sourceIp)"
   if ($ip -and $ip -ne '' -and $ip -ne '-') {
     $ips = @($rec.ips)
     if ($ips -notcontains $ip) {
@@ -1048,7 +1048,9 @@ function Add-ObservedAlert($alert) {
   if (-not $tactic) { $tactic = 'Uncategorised' }
   $hb.tactics[$tactic] = [int]$hb.tactics[$tactic] + 1
   if ($null -eq $hb.startTiles) { $hb.startTiles = Get-TileSnapshot }
-  Update-HostSeen @{ hostname = "$($alert.Host)"; accountName = "$($alert.Account)"; sourceIp = "$($alert.SourceIp)" } $true
+  $fields = @{ hostname = "$($alert.Host)"; accountName = "$($alert.Account)"; sourceIp = "$($alert.SourceIp)" }
+  Update-HostSeen $fields $true
+  Update-IpSeen $fields $true
 }
 
 # ---- the tile values, used for the deltas ---------------------------------
@@ -1524,7 +1526,9 @@ function Get-AssetMap {
     $tactic = if ($a.Tactic) { "$($a.Tactic)" } else { Get-MitreTactic "$($a.Category)" }
     $h = "$($a.Host)"
     if ($h -and $hosts.ContainsKey($h)) {
-      $hosts[$h].alertCount = [int]$hosts[$h].alertCount + 1
+      # alertCount itself is incremented by Update-HostSeen when the alert is
+      # raised (Add-ObservedAlert); counting it here TOO doubled it (22 for 11).
+      # This fold only enriches the row: worst severity, tactics, open ids.
       $hosts[$h].maxSeverity = Get-MaxSeverity $hosts[$h].maxSeverity $sev
       $tacs = @($hosts[$h].tactics)
       if ($tacs -notcontains $tactic) { $tacs += $tactic }
@@ -1563,7 +1567,8 @@ function Get-AssetMap {
     }
     $ip = Get-NormalisedIp "$($a.SourceIp)"
     if ($ip -and $Script:AssetIp.ContainsKey($ip)) {
-      $Script:AssetIp[$ip].alertCount = [int]$Script:AssetIp[$ip].alertCount + 1
+      # as with hosts: Update-IpSeen already counted the alert; doubling it here
+      # made an IP with 3 alerts report 6. Severity still enriches the row.
       $Script:AssetIp[$ip].maxSeverity = Get-MaxSeverity $Script:AssetIp[$ip].maxSeverity $sev
     }
   }
@@ -1653,9 +1658,11 @@ function Get-AssetDetail($kind, $id) {
 # ============================================================
 # Alerts the analyst resolved (or marked false positive) are EXCLUDED - a chain
 # is a live investigation. Alerts are grouped when they share an account OR a
-# host OR a source ip inside a 60-minute sliding window; a chain needs at least
-# two alerts, so single alerts stay out. Deterministic: the same set of alerts
-# always produces the same chains and the same ids.
+# source ip inside a 60-minute sliding window - sharing only the destination
+# host is NOT a link (every alert touching DC01 would be one chain). A chain
+# needs at least two alerts, so single alerts stay out, and an alert with
+# neither an account nor a source ip stays out too. Deterministic: the same set
+# of alerts always produces the same chains and the same ids.
 $Script:ChainWindowMinutes = 60
 $Script:ChainTactics = @('Initial Access', 'Execution', 'Persistence', 'Privilege Escalation',
   'Defense Evasion', 'Credential Access', 'Discovery', 'Lateral Movement',
@@ -1704,8 +1711,13 @@ function Get-AttackChains {
     for ($j = $i + 1; $j -lt $parsed.Count; $j++) {
       $gap = [Math]::Abs(($parsed[$i].When - $parsed[$j].When).TotalMinutes)
       if ($gap -gt $Script:ChainWindowMinutes) { continue }
+      # Two alerts are the same story when the same ACCOUNT did both, or when
+      # the same SOURCE ADDRESS did both. Sharing only the destination host says
+      # nothing: every alert on a DC would merge into one mega-chain. The host
+      # stays an entity/label on the chain; it is never the link.
+      # Alerts with neither an account nor an ip cannot be tied to anything and
+      # stay out (a group of them is not a chain, it is just a host).
       if ($parsed[$i].Account -and $parsed[$i].Account -eq $parsed[$j].Account) { Join-Sets $i $j; continue }
-      if ($parsed[$i].Host -and $parsed[$i].Host -eq $parsed[$j].Host) { Join-Sets $i $j; continue }
       if ($parsed[$i].Ip -and $parsed[$i].Ip -eq $parsed[$j].Ip) { Join-Sets $i $j }
     }
   }

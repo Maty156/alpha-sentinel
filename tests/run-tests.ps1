@@ -1759,7 +1759,9 @@ try {
   # one chain: same account within the window
   Seed-Alert 10 'brute_force_single_account' 'High' 'attacker' 'DC01' '10.0.0.7' $now
   Seed-Alert 11 'privilege_escalation' 'Critical' 'attacker' 'DC01' '10.0.0.7' $now.AddMinutes(5)
-  # a third, joined by HOST even though the account differs
+  # a THIRD alert on the same HOST but a different account and ip: since v2.4.1
+  # sharing only the destination host is NOT a link (every alert touching DC01
+  # would merge into one mega-chain), so it must stay out
   Seed-Alert 12 'log_tampering' 'Critical' 'administrator' 'DC01' '10.0.0.9' $now.AddMinutes(8)
   # outside the window -> its own chain (but alone, so excluded)
   Seed-Alert 13 'kerberoasting' 'High' 'svc-sql' 'DC02' '10.0.0.8' $now.AddMinutes(200)
@@ -1769,23 +1771,85 @@ try {
   $chains = Get-AttackChains
   Assert-True ($chains.Count -eq 1) ('exactly one chain forms (got ' + $chains.Count + ')')
   $c = $chains[0]
-  Assert-True ($c.alerts.Count -eq 3) 'the three in-window alerts are in it'
+  Assert-True ($c.alerts.Count -eq 2) ('the two attacker alerts are the chain (got ' + $c.alerts.Count + ')')
+  Assert-True (@($c.alerts | Where-Object { $_.id -eq 12 }).Count -eq 0) 'an alert sharing only the host does NOT join'
   Assert-True (@($c.alerts | Where-Object { $_.id -eq 14 }).Count -eq 0) 'a Resolved alert is excluded'
   Assert-True (@($c.alerts | Where-Object { $_.id -eq 13 }).Count -eq 0) 'an alert outside the 60-minute window is excluded'
-  Assert-True (@($c.entities.accounts) -contains 'attacker' -and @($c.entities.hosts) -contains 'DC01') 'its entities are the shared account and host'
+  Assert-True (@($c.entities.accounts) -contains 'attacker') 'its entity is the shared account'
+  Assert-True (@($c.entities.hosts) -contains 'DC01') 'and the host is still an entity on the chain (a label, not a link)'
   Assert-True ($c.maxSeverity -eq 'Critical') 'the chain severity is the worst of its alerts'
   Assert-True ("$($c.id)" -match '^[0-9a-f]{12}$') 'the chain id is a stable short hash'
   Assert-True ((Get-AttackChains)[0].id -eq $c.id) 'and identical alerts produce an identical id (deterministic)'
-  # kill-chain ordering: Persistence before Credential Access, Privilege Escalation before Defense Evasion
+  # kill-chain order: Privilege Escalation (3) precedes Credential Access (5)
   $order = @($c.tacticsInOrder)
-  Assert-True ($order.Count -ge 3) 'the tactics are listed in kill-chain order'
-  Assert-True ($order.IndexOf('Persistence') -lt $order.IndexOf('Credential Access')) 'Persistence precedes Credential Access'
-  Assert-True ($order.IndexOf('Privilege Escalation') -lt $order.IndexOf('Defense Evasion')) 'Privilege Escalation precedes Defense Evasion'
-  Assert-True ($order.IndexOf('Defense Evasion') -lt $order.IndexOf('Credential Access')) 'Defense Evasion precedes Credential Access'
+  Assert-True ($order.Count -ge 2) 'the tactics are listed in kill-chain order'
+  Assert-True ($order.IndexOf('Privilege Escalation') -lt $order.IndexOf('Credential Access')) 'Privilege Escalation precedes Credential Access'
   # a single alert stays out even when nothing else exists
   Reset-Engine
   Seed-Alert 20 'log_tampering' 'Critical' 'administrator' 'DC01' '' $now
   Assert-True ((Get-AttackChains).Count -eq 0) 'a single open alert forms no chain'
+
+  # --- the v2.4.1 chain rules ------------------------------------------------
+  # two unrelated accounts on one host: separate chains, or none if < 2 alerts
+  Reset-Engine
+  Seed-Alert 21 'brute_force_single_account' 'High' 'alice' 'DC01' '10.0.0.7' $now
+  Seed-Alert 22 'brute_force_single_account' 'High' 'bob' 'DC01' '10.0.0.8' $now.AddMinutes(3)
+  Assert-True ((Get-AttackChains).Count -eq 0) 'two unrelated accounts on one host form NO chain (one alert each)'
+  Seed-Alert 23 'privilege_escalation' 'Critical' 'alice' 'DC01' '10.0.0.7' $now.AddMinutes(4)
+  Seed-Alert 24 'privilege_escalation' 'Critical' 'bob' 'DC01' '10.0.0.9' $now.AddMinutes(6)
+  $two = @(Get-AttackChains)
+  Assert-True ($two.Count -eq 2) ('two unrelated accounts on one host = 2 separate chains (got ' + $two.Count + ')')
+  Assert-True ((@($two | Where-Object { @($_.entities.accounts) -contains 'alice' }).Count -eq 1) -and (@($two | Where-Object { @($_.entities.accounts) -contains 'bob' }).Count -eq 1)) 'and the two chains do not share alerts'
+  # same account on two hosts = 1 chain
+  Reset-Engine
+  Seed-Alert 25 'brute_force_single_account' 'High' 'attacker' 'DC01' '10.0.0.7' $now
+  Seed-Alert 26 'privilege_escalation' 'Critical' 'attacker' 'DC02' '10.0.0.7' $now.AddMinutes(7)
+  $across = @(Get-AttackChains)
+  Assert-True ($across.Count -eq 1) 'the same account on two hosts = 1 chain'
+  Assert-True (@($across[0].entities.hosts) -contains 'DC01' -and @($across[0].entities.hosts) -contains 'DC02') 'and both hosts are entities on it'
+  # linked by shared SOURCE IP alone (different accounts, different hosts)
+  Reset-Engine
+  Seed-Alert 27 'brute_force_single_account' 'High' 'alice' 'DC01' '203.0.113.9' $now
+  Seed-Alert 28 'log_tampering' 'Critical' 'bob' 'DC02' '203.0.113.9' $now.AddMinutes(9)
+  $byIp = @(Get-AttackChains)
+  Assert-True ($byIp.Count -eq 1) 'a shared source IP links two alerts even with different accounts and hosts'
+  # an alert with neither account nor ip cannot be tied to anything
+  Reset-Engine
+  Seed-Alert 29 'log_tampering' 'Critical' '' 'DC01' '' $now
+  Seed-Alert 30 'account_created' 'Low' 'alice' 'DC01' '' $now.AddMinutes(2)
+  Assert-True ((Get-AttackChains).Count -eq 0) 'an alert with no account and no ip stays out'
+
+  # --- v2.4.1: N alerts give alertCount N (the fold used to double it) ------
+  Reset-Engine
+  $Script:Alerts = New-Object System.Collections.Generic.List[object]
+  $Script:ObsEvents = New-Object System.Collections.Generic.List[object]
+  $Script:ObsHosts = @{}
+  $Script:AssetIp = @{}
+  # the alert path calls Add-ObservedAlert (Update-HostSeen + Update-IpSeen with
+  # isAlert), so 3 alerts must mean 3 - not 6. Seed-Alert only fills the store;
+  # the engine raises via Add-ObservedAlert, so drive that same path here.
+  Seed-Alert 40 'brute_force_single_account' 'High' 'attacker' 'DC01' '203.0.113.9' $now
+  Seed-Alert 41 'privilege_escalation' 'Critical' 'attacker' 'DC01' '203.0.113.9' $now.AddMinutes(1)
+  Seed-Alert 42 'log_tampering' 'Critical' 'admin-x' 'DC01' '203.0.113.9' $now.AddMinutes(2)
+  foreach ($a in [object[]]$Script:Alerts) { Add-ObservedAlert $a }
+  # the account row exists because its events were observed (real traffic always
+  # has the event before the alert); the engine's account map is event-fed
+  Add-ObservedEvent 'Security' @{ eventId = '4624'; hostname = 'DC01'; accountName = 'attacker'; sourceIp = '203.0.113.9' } $null $now
+  Add-ObservedEvent 'Security' @{ eventId = '4624'; hostname = 'DC01'; accountName = 'admin-x'; sourceIp = '203.0.113.9' } $null $now
+  $map3 = Get-AssetMap
+  $dc = $map3.hosts['DC01']
+  Assert-True ([int]$dc.alertCount -eq 3) ('N alerts give alertCount N on a host (got ' + $dc.alertCount + ')')
+  $ipRec = $map3.ips['203.0.113.9']
+  Assert-True ($null -ne $ipRec) 'the alerts ip is an asset'
+  Assert-True ([int]$ipRec.alertCount -eq 3) ('and N on the ip too (got ' + $ipRec.alertCount + ')')
+  $atk = $map3.accounts['attacker']
+  Assert-True ($null -ne $atk -and [int]$atk.alertCount -eq 2) ('N on the account as well (got ' + $(if ($atk) { $atk.alertCount } else { 'n/a' }) + ')')
+  # ::ffff: never leaks into host.ips (v2.4.1 normalisation)
+  Reset-Engine
+  Add-ObservedEvent 'Security' @{ eventId = '4624'; hostname = 'MAIL01'; accountName = 'jsmith'; sourceIp = '::ffff:10.0.0.77' } $null $now
+  $map4 = Get-AssetMap
+  Assert-True (@($map4.hosts['MAIL01'].ips) -contains '10.0.0.77') 'host.ips holds the normalised address'
+  Assert-True (@($map4.hosts['MAIL01'].ips) -notcontains '::ffff:10.0.0.77') 'and never the ::ffff: form'
 
   Write-Host ""
   Write-Host "== v2.4 part 3: the report ==" -ForegroundColor Cyan

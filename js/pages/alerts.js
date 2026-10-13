@@ -192,6 +192,9 @@
   function load(silent) {
     return S.api.get('/api/alerts', 'alerts').then(function (rows) {
       data = Array.isArray(rows) ? rows : [];
+      /* publish for the other pages: the Assets drawer labels its links with
+         "#id - title (severity)" and should not need its own request to do it */
+      S.state.set('alerts', data);
       paint();
     }).catch(function (err) {
       if (silent) { return; }
