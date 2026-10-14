@@ -1,5 +1,48 @@
 ﻿# Changelog
 
+## v2.5.0
+
+Settings that DO things - account management and the audit policy from the UI.
+**857 assertions** (`tests/run-tests.ps1`), up from 816.
+
+### Account management (Settings > Account / Users)
+
+- `POST /api/account/password` re-verifies the current password (a wrong one
+  counts as a login failure for the caller's IP), requires 12+ characters that
+  differ from both the username and the current password, rewrites the record
+  with a fresh salt and 150000 iterations, ends every OTHER session of the user
+  and rotates the caller's session id.
+- `POST /api/account/username` re-authenticates, then renames (3-32 chars of
+  `A-Za-z0-9._-`, unique case-insensitively); the session continues under the
+  new name.
+- `GET /api/users` (names and dates only - never a hash or salt),
+  `POST /api/users` (create), `/reset` and `/remove` - all re-authenticate with
+  the caller's password. The last account cannot be removed, self-removal is
+  refused, targets are looked up in the users list (never a path), and every
+  change ends that user's sessions.
+- `POST /api/account/avatar` stores initials (1-2 chars A-Z0-9) and one of
+  eight fixed palette colours - no file upload - returned by `/api/session`
+  and shown in the topbar user menu (Account, Logout).
+
+### Audit policy from the UI (Settings > Audit)
+
+- `GET /api/audit` (per-rule state, subcategory + flag needed, last change,
+  backup names, elevation), `POST /api/audit/preview` (the exact diff,
+  changing nothing), `POST /api/audit/apply` (re-auth, then the same
+  backup-first, enable-only, idempotent code as `-EnableAudit`, preflight
+  re-run at once, who/what auth-logged) and `POST /api/audit/restore`
+  (re-auth; only backups this tool created, by name - path tricks are 400).
+- Without elevation the change routes answer 409 and the tab is read-only.
+- The confirm dialog lists every before -> after row before anything happens.
+
+### Also
+
+- Empty responses from `GET /api/users` and `POST /api/audit/preview`
+  serialise as `[]` (an empty array through a pipeline was `$null`, and
+  `UTF8.GetBytes($null)` was a 500).
+- `tests/run-tests.ps1` builds its scratch dirs with
+  `[IO.Path]::GetTempPath()` instead of `$env:TEMP`.
+
 ## v2.4.1
 
 Review fixes and lab-box behaviour, no new detection features. **816 assertions**

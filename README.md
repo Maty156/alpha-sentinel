@@ -119,7 +119,7 @@ Optional flags:
 | `-CatchUpMilliseconds` | 200 | when a poll was capped, retry this soon instead of a whole `-PollSeconds` |
 | `-Background` | off | hide the console window |
 | `-Stop` | - | stop a running background monitor and exit |
-| `-EnableAudit` | off | set the audit subcategories the rules need: backs the policy up first (`sentinel-audit-backup-<timestamp>.csv`), only ever ENABLES what a rule needs, is idempotent, refuses without Administrator. Undo with `-RestoreAudit <that backup>` |
+| `-EnableAudit` | off | set the audit subcategories the rules need: backs the policy up first (`sentinel-audit-backup-<timestamp>.csv`), only ever ENABLES what a rule needs, is idempotent, refuses without Administrator. Undo with `-RestoreAudit <that backup>` - or from the dashboard's Settings > Audit tab |
 | `-RestoreAudit <file>` | - | restore an audit-policy backup (`auditpol /restore`) and exit |
 | `-ForwardUrl` / `-ForwardKey` | - | forward detections to the ALPHA web platform |
 | `-HistoryFile` | `sentinel-history.csv` | alert history |
@@ -304,7 +304,19 @@ Eight pages, one file each (see `js/pages/`):
   forwarding on/off and destination host, the audit preflight and the account names
   with creation dates. No secret is ever rendered.
 
-**Attack Paths** is the one remaining disabled "Soon" item: no route, no page. The top
+**Attack Paths** is the one remaining disabled "Soon" item: no route, no page.
+
+Settings has four tabs: **General** is the read-only configuration view; **Account**
+changes your own password (>= 12 characters, the current one re-verified, every other
+session of yours ends and the current one is rotated), your sign-in name (re-auth, 3-32
+characters of `A-Za-z0-9._-`, unique) and a small avatar (initials + one of eight fixed
+colours - no file upload); **Users** lists the accounts and creates, resets or removes
+them - every change needs YOUR password again, the last account cannot be removed, you
+cannot remove yourself, and the affected user's sessions all end; **Audit** shows each
+rule family's audit state with a preview of what would change, and can apply it (the
+same backup-first, enable-only, idempotent code as `-EnableAudit`) or restore one of
+the backups the tool wrote - restore accepts only those file names, never a path.
+Without elevation the audit tab is read-only. The top
 search box filters the table on the current page only, and the range selector is fixed
 at 24 hours - neither invents an endpoint. The header carries the health pill, which
 says **why** rather than just that something is off: **Blind** (red) when a rule family
@@ -376,7 +388,7 @@ event log, no HTTP and no network needed - by a runner that drives the same
 functions the live monitor uses:
 
 ```powershell
-.\tests\run-tests.ps1      # 816 assertions, exit code 1 on any failure
+.\tests\run-tests.ps1      # 857 assertions, exit code 1 on any failure
 ```
 
 It covers detection behaviour in both directions, dedupe-per-entity, the
