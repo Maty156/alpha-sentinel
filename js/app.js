@@ -64,7 +64,49 @@
     }).catch(function () { return null; });
   }
 
+  /* the topbar avatar chip: initials + palette colour from the user record */
+  var AVATAR_HEX = {
+    crimson: '#d2103c', ember: '#ff8a3d', amber: '#ffc247', moss: '#7bc47f',
+    teal: '#2ec4a6', azure: '#4d9fff', violet: '#a06bff', slate: '#8fa3bd'
+  };
+  function paintAvatar(initials, color) {
+    var host = document.getElementById('userAvatar');
+    if (!host) { return; }
+    if (!initials) { host.hidden = true; host.textContent = ''; host.style.backgroundColor = ''; return; }
+    host.hidden = false;
+    host.textContent = String(initials).toUpperCase();
+    host.style.backgroundColor = AVATAR_HEX[color] || AVATAR_HEX.slate;
+  }
+  S.topbarAvatar = paintAvatar;
+
   function wireShell() {
+    var chip = document.getElementById('userChip');
+    var drop = document.getElementById('userDropdown');
+    if (chip && drop) {
+      chip.addEventListener('click', function () {
+        var open = !drop.hidden;
+        drop.hidden = open;
+        chip.setAttribute('aria-expanded', open ? 'false' : 'true');
+      });
+      document.addEventListener('click', function (ev) {
+        if (drop.hidden) { return; }
+        var menu = document.getElementById('userMenu');
+        if (menu && !menu.contains(ev.target)) {
+          drop.hidden = true;
+          chip.setAttribute('aria-expanded', 'false');
+        }
+      });
+    }
+    var accountItem = document.getElementById('menuAccount');
+    if (accountItem) {
+      accountItem.addEventListener('click', function () {
+        if (drop) { drop.hidden = true; }
+        window.location.hash = '#/settings';
+        /* land on the Account tab, not the last-viewed one */
+        try { window.sessionStorage.setItem('sentinel-settings-tab', 'account'); } catch (e) { }
+        if (S.router.current() === 'settings' && S.pages.settings.repaint) { S.pages.settings.repaint(); }
+      });
+    }
     var out = document.getElementById('logout');
     if (out) {
       out.addEventListener('click', function () {
@@ -94,6 +136,7 @@
     S.api.get('/api/session', 'boot').then(function (session) {
       var who = document.getElementById('whoami');
       if (who) { who.textContent = session && session.user ? session.user : 'signed in'; }
+      paintAvatar(session && session.avatarInitials, session && session.avatarColor);
     }).catch(function () { /* a 401 already redirected */ });
 
     refreshOverview();

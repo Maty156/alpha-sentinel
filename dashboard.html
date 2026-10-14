@@ -58,8 +58,17 @@
       <select class="field" id="range" title="The dashboard always shows the last 24 hours" aria-label="Time range">
         <option>Last 24 hours</option>
       </select>
-      <span class="pill"><span class="dot"></span><span id="whoami">signed in</span></span>
-      <button class="btn btn-sm" id="logout" type="button">Logout</button>
+      <div class="user-menu" id="userMenu">
+        <button class="user-chip" id="userChip" type="button" aria-haspopup="true" aria-expanded="false" title="Account menu">
+          <span class="user-avatar" id="userAvatar" hidden></span>
+          <span id="whoami">signed in</span>
+          <svg class="user-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div class="user-dropdown" id="userDropdown" hidden>
+          <button class="user-item" id="menuAccount" type="button">Account</button>
+          <button class="user-item user-item-logout" id="logout" type="button">Logout</button>
+        </div>
+      </div>
     </header>
 
     <main id="view" class="view" aria-live="polite"></main>
@@ -81,6 +90,10 @@
 <script src="/js/pages/assets.js"></script>
 <script src="/js/pages/reports.js"></script>
 <script src="/js/pages/settings.js"></script>
+<script src="/js/pages/settings-general.js"></script>
+<script src="/js/pages/settings-account.js"></script>
+<script src="/js/pages/settings-users.js"></script>
+<script src="/js/pages/settings-audit.js"></script>
 <script src="/js/app.js"></script>
 </body>
 </html>

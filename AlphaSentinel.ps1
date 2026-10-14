@@ -532,6 +532,9 @@ $Script:ChannelLastSuccess = @{}  # channel -> last fully successful poll
 $Script:ChannelLastError = @{}    # channel -> last error message for that channel
 $Script:XPathFallback = @{}       # channel -> $true once the XPath pre-filter was rejected
 $Script:ChannelUnavailable = @{}  # channel -> $true when the OS has no such log (skipped forever, not an error)
+$Script:AuditStateTestSeed = $false  # the suite seeds the audit state itself; the preview must not re-read
+$Script:AuditChangeCaller = $null    # the signed-in user driving an audit apply from the UI
+$Script:AuditChangeCallerIp = $null  # their address, for the auth log
 $Script:EvalErrors = 0            # events the rule engine threw on (skipped, not fatal)
 $Script:LastEvalError = ''
 $Script:PollErrors = 0            # failed channel queries (watermark left alone)
@@ -1322,6 +1325,8 @@ function Get-SettingsPayload {
       unknownCount = $pre.unknownCount
       fix         = @($pre.fix)
       lastChange  = Get-LastAuditChange
+      elevated    = (Test-ProcessElevated)
+      backups     = (Get-AuditBackups)
     }
     users        = $users
     usersFileState = (Get-UsersFileState).reason
@@ -2857,6 +2862,76 @@ function Test-SentinelIsAdmin {
   }
 }
 
+# The exact changes -EnableAudit would make, WITHOUT making them: the wanted
+# set the real function computes, as rows for /api/audit/preview and for the
+# UI's confirm dialog.
+function Get-AuditChangePreview {
+  # The suite seeds $Script:AuditState directly (there is no auditpol on the
+  # test host); $Script:AuditStateTestSeed says 'already seeded, do not re-read'.
+  if (-not $Script:AuditStateTestSeed) { $null = Update-AuditPreflight }
+  $changes = @()
+  if ($null -eq $Script:AuditState) { return @() }
+  $rules = @(Get-RuleCatalog)
+  $wanted = @{}
+  foreach ($r in $rules) {
+    if ($r.auditState -eq 'n/a' -or $r.auditState -eq 'ok') { continue }
+    foreach ($sub in @("$($r.auditSubcategory)" -split ' \+ ')) {
+      if (-not $sub) { continue }
+      $cur = "$($Script:AuditState[$sub.ToLower()])"
+      if ($cur -eq '') { $cur = 'No Auditing' }
+      $need = "$($r.auditRequired)"
+      $flags = @()
+      if ($need -match 'Success' -and $cur -notmatch 'Success') { $flags += 'success' }
+      if ($need -match 'Failure' -and $cur -notmatch 'Failure') { $flags += 'failure' }
+      if ($flags.Count -eq 0) { continue }
+      if (-not $wanted.ContainsKey($sub)) {
+        $wanted[$sub] = @{ before = $cur; flags = @(); rules = @() }
+      }
+      foreach ($f in $flags) {
+        if ($wanted[$sub].flags -notcontains $f) { $wanted[$sub].flags += $f }
+      }
+      $wanted[$sub].rules += $r.key
+    }
+  }
+  foreach ($sub in $wanted.Keys) {
+    $changes += [PSCustomObject]@{
+      subcategory = $sub
+      before      = "$($wanted[$sub].before)"
+      after       = (Get-AuditAfterLabel "$($wanted[$sub].before)" @($wanted[$sub].flags | Select-Object -Unique))
+      flags       = @($wanted[$sub].flags | Select-Object -Unique)
+      rules       = @($wanted[$sub].rules | Select-Object -Unique)
+    }
+  }
+  return @($changes | Sort-Object subcategory)
+}
+
+# Computes the 'after' cell for a preview row from the flags it will enable.
+function Get-AuditAfterLabel([string]$Before, [string[]]$Flags) {
+  $after = "$Before"
+  foreach ($f in @($Flags)) {
+    if ($f -eq 'success' -and $after -notmatch 'Success') { $after = if ($after -eq 'No Auditing' -or $after -eq '') { 'Success' } else { 'Success and Failure' } }
+    if ($f -eq 'failure' -and $after -notmatch 'Failure') { $after = if ($after -eq 'No Auditing' -or $after -eq '') { 'Failure' } else { 'Success and Failure' } }
+  }
+  return $after
+}
+
+# Backup files THIS TOOL created (sentinel-audit-backup-*.csv beside the
+# script), by NAME only - the restore path accepts one of these names, never a
+# path.
+function Get-AuditBackups {
+  $names = @()
+  try {
+    $files = @(Get-ChildItem -Path $PSScriptRoot -Filter 'sentinel-audit-backup-*.csv' -File -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTimeUtc -Descending)
+    foreach ($f in $files) { $names += $f.Name }
+  } catch { }
+  return @($names)
+}
+
+function Test-ProcessElevated {
+  return (Test-SentinelIsAdmin)
+}
+
 function Enable-SentinelAuditPolicy {
   # requires Administrator - auditpol /set fails without it, and half-applied
   # audit policies are worse than none
@@ -2905,6 +2980,7 @@ function Enable-SentinelAuditPolicy {
   }
   # 3. change, one subcategory at a time, never turning anything off
   $changed = 0
+  $changedBy = if ($Script:AuditChangeCaller) { $Script:AuditChangeCaller } else { 'console (-EnableAudit)' }
   Write-Host ""
   Write-Host "  subcategory                          | before               | after"
   Write-Host "  -------------------------------------+----------------------+----------------------"
@@ -2927,11 +3003,27 @@ function Enable-SentinelAuditPolicy {
     Write-Host ("  " + $sub.PadRight(37) + "| " + $cur.PadRight(20) + "| " + $after)
     Write-AuditChange $sub $cur $after $backup
     $changed++
+    if ($Script:AuditChangeCaller) {
+      Write-AuthEvent $Script:AuditChangeCallerIp $Script:AuditChangeCaller 'success' ("audit policy set: " + $sub + " -> " + $after)
+    }
   }
   Write-Host ("  [audit] " + $changed + " subcategory(ies) updated (only enabled; nothing was ever turned off).") -ForegroundColor Green
   # 4. re-read so coverage and health update immediately, no restart
   $null = Update-AuditPreflight
   return $true
+}
+
+# The UI entry point for Settings > Audit: same code as -EnableAudit, but the
+# caller is the signed-in dashboard user (who re-authenticated to get here).
+function Invoke-AuditPolicyApply([string]$CallerName, [string]$CallerIp) {
+  $Script:AuditChangeCaller = $CallerName
+  $Script:AuditChangeCallerIp = $CallerIp
+  try {
+    return (Enable-SentinelAuditPolicy)
+  } finally {
+    $Script:AuditChangeCaller = $null
+    $Script:AuditChangeCallerIp = $null
+  }
 }
 
 function Restore-SentinelAuditPolicy([string]$BackupFile) {
@@ -3229,6 +3321,180 @@ function Get-UserStore {
     if (-not $raw) { return $null }
     return ($raw | ConvertFrom-Json)
   } catch { return $null }
+}
+
+# Writes the users store the way New-SentinelAdmin.ps1 does: ASCII content,
+# UTF-8 with BOM, one WriteAllText (atomic enough for this file's size and the
+# same encoding every reader expects).
+function Save-UserStore($Store) {
+  $json = $Store | ConvertTo-Json -Depth 5
+  $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+  [System.IO.File]::WriteAllText($UsersFile, $json, $utf8Bom)
+  $null = Update-UsersFingerprint   # so Revoke-StaleSessions sees the new stamps
+}
+
+# Rewrites one user record with a fresh salt/hash (the v2.5 iteration count) and
+# a new 'updated' stamp; keeps the original 'created'.
+function Set-UserPassword([string]$UserName, [string]$PlainText, [int]$Iterations) {
+  $store = Get-UserStore
+  if (-not $store -or -not $store.users) { return $null }
+  $record = Get-UserRecord $store $UserName
+  if (-not $record) { return $null }
+  $salt = New-PasswordSalt
+  $hash = Get-PasswordHash $PlainText $salt $Iterations
+  $now = (Get-Date).ToUniversalTime().ToString("o")
+  $users = @()
+  foreach ($u in @($store.users)) {
+    if ("$($u.user)" -eq $UserName) {
+      $users += [PSCustomObject]@{
+        user       = "$($u.user)"
+        salt       = (ConvertTo-Hex $salt)
+        hash       = (ConvertTo-Hex $hash)
+        iterations = $Iterations
+        created    = if ("$($u.created)") { "$($u.created)" } else { $now }
+        updated    = $now
+        avatarColor = if ($u.avatarColor) { "$($u.avatarColor)" } else { '' }
+        avatarInitials = if ($u.avatarInitials) { "$($u.avatarInitials)" } else { '' }
+      }
+    } else {
+      $users += $u
+    }
+  }
+  Save-UserStore ([PSCustomObject]@{ version = 1; users = $users })
+  return $now
+}
+
+# Rewrites the user's NAME (Settings > Account). Sessions of the old name are
+# ended by the caller; the caller's own session is re-stamped below.
+function Rename-User([string]$OldName, [string]$NewName) {
+  $store = Get-UserStore
+  if (-not $store -or -not $store.users) { return $null }
+  $now = (Get-Date).ToUniversalTime().ToString("o")
+  $users = @()
+  foreach ($u in @($store.users)) {
+    if ("$($u.user)" -eq $OldName) {
+      $users += [PSCustomObject]@{
+        user       = $NewName
+        salt       = "$($u.salt)"
+        hash       = "$($u.hash)"
+        iterations = [int]$u.iterations
+        created    = "$($u.created)"
+        updated    = $now
+        avatarColor = if ($u.avatarColor) { "$($u.avatarColor)" } else { '' }
+        avatarInitials = if ($u.avatarInitials) { "$($u.avatarInitials)" } else { '' }
+      }
+    } else {
+      $users += $u
+    }
+  }
+  Save-UserStore ([PSCustomObject]@{ version = 1; users = $users })
+  return $now
+}
+
+# Adds a user (Settings > Users). The password arrives from the form; it is
+# hashed here and never stored or logged.
+function Add-User([string]$Name, [string]$PlainText) {
+  $store = Get-UserStore
+  if (-not $store) { $store = [PSCustomObject]@{ version = 1; users = @() } }
+  $salt = New-PasswordSalt
+  $hash = Get-PasswordHash $PlainText $salt $Script:Pbkdf2Iterations
+  $now = (Get-Date).ToUniversalTime().ToString("o")
+  $users = @(@($store.users))
+  $users += [PSCustomObject]@{
+    user = $Name; salt = (ConvertTo-Hex $salt); hash = (ConvertTo-Hex $hash)
+    iterations = $Script:Pbkdf2Iterations; created = $now; updated = $now
+    avatarColor = ''; avatarInitials = ''
+  }
+  Save-UserStore ([PSCustomObject]@{ version = 1; users = $users })
+  return $now
+}
+
+# Removes a user record. The caller has already refused the last-user and
+# self-removal cases.
+function Remove-UserRecord([string]$Name) {
+  $store = Get-UserStore
+  if (-not $store -or -not $store.users) { return $false }
+  $kept = @(@($store.users) | Where-Object { "$($_.user)" -ne $Name })
+  if (@($kept).Count -eq @($store.users).Count) { return $false }
+  Save-UserStore ([PSCustomObject]@{ version = 1; users = $kept })
+  return $true
+}
+
+# Ends every session belonging to one user (all the user-change routes do this,
+# so a removed or rewritten account is signed out on the very next request).
+function Revoke-UserSessions([string]$UserName) {
+  $dropped = 0
+  foreach ($id in @($Script:Sessions.Keys)) {
+    if ("$($Script:Sessions[$id].User)" -eq $UserName) {
+      $Script:Sessions.Remove($id)
+      $dropped++
+    }
+  }
+  return $dropped
+}
+
+# Rotates the CALLER's session: same account, brand-new id (a password change
+# should not sign the person who just changed it out of the tab they are in,
+# but the old cookie must stop working).
+function Rotate-Session([string]$OldSessionId, [string]$UserName) {
+  $new = New-Session $UserName
+  Remove-Session $OldSessionId
+  return $new
+}
+
+# The fixed avatar palette (Settings > Account): keys, never free-form CSS.
+$Script:AvatarPalette = @('crimson', 'ember', 'amber', 'moss', 'teal', 'azure', 'violet', 'slate')
+
+function Test-AvatarColor([string]$Key) {
+  return ($Script:AvatarPalette -contains "$Key")
+}
+
+function Test-AvatarInitials([string]$Initials) {
+  return ("$Initials" -match '^[A-Z0-9]{1,2}$')
+}
+
+# Sets the avatar fields on one user record (no file upload, by design).
+function Set-UserAvatar([string]$UserName, [string]$Color, [string]$Initials) {
+  $store = Get-UserStore
+  if (-not $store -or -not $store.users) { return $null }
+  $now = (Get-Date).ToUniversalTime().ToString("o")
+  $users = @()
+  foreach ($u in @($store.users)) {
+    if ("$($u.user)" -eq $UserName) {
+      $users += [PSCustomObject]@{
+        user = "$($u.user)"; salt = "$($u.salt)"; hash = "$($u.hash)"
+        iterations = [int]$u.iterations
+        created = "$($u.created)"
+        updated = $now
+        avatarColor = $Color; avatarInitials = $Initials
+      }
+    } else { $users += $u }
+  }
+  Save-UserStore ([PSCustomObject]@{ version = 1; users = $users })
+  return $now
+}
+
+# /api/users: names and dates only - never a hash, salt or iteration count.
+function Get-UsersPayload([string]$CurrentUser) {
+  $store = Get-UserStore
+  $rows = @()
+  if ($store -and $store.users) {
+    foreach ($u in @($store.users)) {
+      $created = "$($u.created)"
+      $updated = "$($u.updated)"
+      try { $created = ([datetime]$u.created).ToUniversalTime().ToString("o") } catch { }
+      try { $updated = ([datetime]$u.updated).ToUniversalTime().ToString("o") } catch { }
+      $rows += [PSCustomObject]@{
+        name    = "$($u.user)"
+        created = $created
+        updated = $updated
+        current = ("$($u.user)" -eq $CurrentUser)
+        avatarColor    = if ($u.avatarColor) { "$($u.avatarColor)" } else { '' }
+        avatarInitials = if ($u.avatarInitials) { "$($u.avatarInitials)" } else { '' }
+      }
+    }
+  }
+  return @($rows)
 }
 
 function Get-UserRecord($store, [string]$UserName) {
@@ -3641,6 +3907,10 @@ $Script:StaticFiles = @{
   '/js/pages/rules.js'    = @{ file = 'js/pages/rules.js';    type = 'application/javascript; charset=utf-8' }
   '/js/pages/events.js'   = @{ file = 'js/pages/events.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/settings.js' = @{ file = 'js/pages/settings.js'; type = 'application/javascript; charset=utf-8' }
+  '/js/pages/settings-general.js' = @{ file = 'js/pages/settings-general.js'; type = 'application/javascript; charset=utf-8' }
+  '/js/pages/settings-account.js' = @{ file = 'js/pages/settings-account.js'; type = 'application/javascript; charset=utf-8' }
+  '/js/pages/settings-users.js'   = @{ file = 'js/pages/settings-users.js';   type = 'application/javascript; charset=utf-8' }
+  '/js/pages/settings-audit.js'   = @{ file = 'js/pages/settings-audit.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/chains.js'   = @{ file = 'js/pages/chains.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/assets.js'   = @{ file = 'js/pages/assets.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/reports.js'  = @{ file = 'js/pages/reports.js';  type = 'application/javascript; charset=utf-8' }
@@ -3779,7 +4049,9 @@ function Invoke-Handler($ctx) {
     }
 
     # ---- state-changing routes are POST-only and same-origin
-    if ($path -match '^/api/alerts/\d+/(ack|unack|status)$' -or $path -eq '/api/self-test' -or $path -eq '/api/preflight/refresh' -or $path -eq '/api/logout') {
+    if ($path -match '^/api/alerts/\d+/(ack|unack|status)$' -or $path -eq '/api/self-test' -or $path -eq '/api/preflight/refresh' -or $path -eq '/api/logout' -or
+        $path -match '^/api/account/(password|username|avatar)$' -or ($path -eq '/api/users' -and $method -eq 'POST') -or
+        $path -match '^/api/users/[^/]+/(reset|remove)$' -or $path -match '^/api/audit/(apply|restore)$') {
       if ($method -ne 'POST') {
         Send-Json $res '{"error":"Method not allowed - this endpoint changes state, so it accepts POST only."}' 405
         return
@@ -3864,11 +4136,15 @@ function Invoke-Handler($ctx) {
       }
       '^/api/session$' {
         $s = Get-Session (Get-SessionIdFromContext $ctx)
+        $store = Get-UserStore
+        $rec = Get-UserRecord $store "$($s.User)"
         Send-Json $res (@{
           ok          = $true
           user        = "$($s.User)"
           sessionHours = $Script:SessionHours
           idleMinutes  = $Script:IdleMinutes
+          avatarColor    = if ($rec -and $rec.avatarColor) { "$($rec.avatarColor)" } else { '' }
+          avatarInitials = if ($rec -and $rec.avatarInitials) { "$($rec.avatarInitials)" } else { '' }
         } | ConvertTo-Json)
       }
       '^/api/health$' {
@@ -4067,6 +4343,368 @@ function Invoke-Handler($ctx) {
           }
           Save-History
           Send-Json $res (@{ ok = $true; id = $id; status = $alert.Status; notes = $alert.Notes } | ConvertTo-Json)
+        }
+      }
+      # ---- Settings > Account / Users (v2.5) ---------------------------------
+      # Every route here: session required (the global gate), POST for changes,
+      # same-origin (checked below per route), re-auth with a real password,
+      # and auth-logged. Passwords and hashes never appear in a response or log.
+      '^/api/account/password$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $sid = Get-SessionIdFromContext $ctx
+        $sess = Get-Session $sid
+        if (-not $sess) { Send-Json $res '{"error":"Not signed in."}' 401; return }
+        $me = "$($sess.User)"
+        $body = $bodyParsed
+        $current = if ($body -and $null -ne $body.current) { "$($body.current)" } else { '' }
+        $new = if ($body -and $null -ne $body.new) { "$($body.new)" } else { '' }
+        if (-not $current -or -not $new) {
+          Write-AuthEvent $clientIp $me 'failure' 'password change: missing fields'
+          Send-Json $res '{"error":"Current and new password are required."}' 400
+          return
+        }
+        # a failed 'current' IS a login failure for this address
+        if (-not (Test-LoginAllowed $clientIp)) {
+          $retry = Get-LoginRetryAfter $clientIp
+          try { $res.Headers.Add('Retry-After', "$retry") } catch { }
+          Write-AuthEvent $clientIp $me 'blocked' "rate limited, $retry s remaining"
+          Send-Json $res '{"error":"Too many failed attempts from this address. Try again in a few minutes."}' 429
+          return
+        }
+        if (-not (Test-UserPassword $me $current)) {
+          $rec = Register-LoginFailure $clientIp
+          Write-AuthEvent $clientIp $me 'failure' "password change: wrong current password (failure $($rec.Count) in window)"
+          Send-Json $res '{"error":"The current password is not correct."}' 403
+          return
+        }
+        if ($new.Length -lt 12) {
+          Write-AuthEvent $clientIp $me 'failure' 'password change: new password too short'
+          Send-Json $res '{"error":"The new password must be at least 12 characters."}' 400
+          return
+        }
+        if ($new -ceq $me) {
+          Write-AuthEvent $clientIp $me 'failure' 'password change: new password equals the username'
+          Send-Json $res '{"error":"The new password must not be your username."}' 400
+          return
+        }
+        if ($new -ceq $current) {
+          Write-AuthEvent $clientIp $me 'failure' 'password change: new password equals the current one'
+          Send-Json $res '{"error":"The new password must differ from the current one."}' 400
+          return
+        }
+        # rewrite the record, end every OTHER session of this user, rotate mine
+        $null = Set-UserPassword $me $new $Script:Pbkdf2Iterations
+        $others = 0
+        foreach ($id2 in @($Script:Sessions.Keys)) {
+          if ($id2 -ne $sid -and "$($Script:Sessions[$id2].User)" -eq $me) {
+            $Script:Sessions.Remove($id2)
+            $others++
+          }
+        }
+        # my session keeps running, under a fresh id, re-stamped to the new record
+        $newSid = New-Session $me
+        Remove-Session $sid
+        Write-AuthEvent $clientIp $me 'success' ("password changed; " + $others + " other session(s) ended")
+        $res.Headers.Add('Set-Cookie', "sentinel_session=$newSid; Path=/; HttpOnly; SameSite=Strict")
+        Send-Json $res (@{ ok = $true; sessionsEnded = $others } | ConvertTo-Json)
+      }
+      '^/api/account/username$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $sid = Get-SessionIdFromContext $ctx
+        $sess = Get-Session $sid
+        if (-not $sess) { Send-Json $res '{"error":"Not signed in."}' 401; return }
+        $me = "$($sess.User)"
+        $body = $bodyParsed
+        $password = if ($body -and $null -ne $body.password) { "$($body.password)" } else { '' }
+        $newName = if ($body -and $null -ne $body.newName) { "$($body.newName)" } else { '' }
+        if (-not $password -or -not $newName) {
+          Write-AuthEvent $clientIp $me 'failure' 'username change: missing fields'
+          Send-Json $res '{"error":"Password and new name are required."}' 400
+          return
+        }
+        if (-not (Test-LoginAllowed $clientIp)) {
+          $retry = Get-LoginRetryAfter $clientIp
+          try { $res.Headers.Add('Retry-After', "$retry") } catch { }
+          Send-Json $res '{"error":"Too many failed attempts from this address. Try again in a few minutes."}' 429
+          return
+        }
+        if (-not (Test-UserPassword $me $password)) {
+          $rec = Register-LoginFailure $clientIp
+          Write-AuthEvent $clientIp $me 'failure' "username change: wrong password (failure $($rec.Count) in window)"
+          Send-Json $res '{"error":"The password is not correct."}' 403
+          return
+        }
+        if ($newName -notmatch '^[A-Za-z0-9._-]{3,32}$') {
+          Write-AuthEvent $clientIp $me 'failure' 'username change: invalid name'
+          Send-Json $res '{"error":"The name must be 3-32 characters of A-Z, a-z, 0-9, dot, underscore or hyphen."}' 400
+          return
+        }
+        $store = Get-UserStore
+        $nameTaken = $false
+        foreach ($u in @($store.users)) {
+          if ("$($u.user)" -ne $me -and "$($u.user)".ToLower() -eq $newName.ToLower()) { $nameTaken = $true }
+        }
+        if ($nameTaken) {
+          Write-AuthEvent $clientIp $me 'failure' 'username change: name already in use'
+          Send-Json $res '{"error":"That name is already in use."}' 409
+          return
+        }
+        $null = Rename-User $me $newName
+        # my session continues under the new name: re-point it and rotate the id
+        $newSid = New-Session $newName
+        Remove-Session $sid
+        Write-AuthEvent $clientIp $newName 'success' ("username changed from " + $me)
+        $res.Headers.Add('Set-Cookie', "sentinel_session=$newSid; Path=/; HttpOnly; SameSite=Strict")
+        Send-Json $res (@{ ok = $true; user = $newName } | ConvertTo-Json)
+      }
+      '^/api/users$' {
+        if ($method -eq 'GET') {
+          Send-Json $res (ConvertTo-JsonArray (Get-UsersPayload (Get-SessionUser $ctx)))
+          return
+        }
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - GET to read, POST to create."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $me = Get-SessionUser $ctx
+        $body = $bodyParsed
+        $password = if ($body -and $null -ne $body.password) { "$($body.password)" } else { '' }
+        $newName = if ($body -and $null -ne $body.name) { "$($body.name)" } else { '' }
+        $newPass = if ($body -and $null -ne $body.newPassword) { "$($body.newPassword)" } else { '' }
+        if (-not $password -or -not $newName -or -not $newPass) {
+          Write-AuthEvent $clientIp $me 'failure' 'user create: missing fields'
+          Send-Json $res '{"error":"Your password, the new name and a password for it are required."}' 400
+          return
+        }
+        if (-not (Test-LoginAllowed $clientIp)) {
+          Send-Json $res '{"error":"Too many failed attempts from this address. Try again in a few minutes."}' 429
+          return
+        }
+        if (-not (Test-UserPassword $me $password)) {
+          $rec = Register-LoginFailure $clientIp
+          Write-AuthEvent $clientIp $me 'failure' "user create: wrong caller password (failure $($rec.Count) in window)"
+          Send-Json $res '{"error":"Your password is not correct."}' 403
+          return
+        }
+        if ($newName -notmatch '^[A-Za-z0-9._-]{3,32}$') {
+          Send-Json $res '{"error":"The name must be 3-32 characters of A-Z, a-z, 0-9, dot, underscore or hyphen."}' 400
+          return
+        }
+        if ($newPass.Length -lt 12) {
+          Send-Json $res '{"error":"The password must be at least 12 characters."}' 400
+          return
+        }
+        $store = Get-UserStore
+        foreach ($u in @($store.users)) {
+          if ("$($u.user)".ToLower() -eq $newName.ToLower()) {
+            Send-Json $res '{"error":"That name is already in use."}' 409
+            return
+          }
+        }
+        $null = Add-User $newName $newPass
+        Write-AuthEvent $clientIp $me 'success' ("user created: " + $newName)
+        Send-Json $res (@{ ok = $true; name = $newName } | ConvertTo-Json)
+      }
+      '^/api/users/([^/]+)/reset$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $me = Get-SessionUser $ctx
+        # the target is a LIST lookup, never a path
+        $target = [uri]::UnescapeDataString($Matches[1])
+        $body = $bodyParsed
+        $password = if ($body -and $null -ne $body.password) { "$($body.password)" } else { '' }
+        $newPass = if ($body -and $null -ne $body.newPassword) { "$($body.newPassword)" } else { '' }
+        if (-not $password -or -not $newPass) {
+          Write-AuthEvent $clientIp $me 'failure' 'user reset: missing fields'
+          Send-Json $res '{"error":"Your password and the new password are required."}' 400
+          return
+        }
+        if (-not (Test-LoginAllowed $clientIp)) {
+          Send-Json $res '{"error":"Too many failed attempts from this address. Try again in a few minutes."}' 429
+          return
+        }
+        if (-not (Test-UserPassword $me $password)) {
+          $rec = Register-LoginFailure $clientIp
+          Write-AuthEvent $clientIp $me 'failure' "user reset: wrong caller password (failure $($rec.Count) in window)"
+          Send-Json $res '{"error":"Your password is not correct."}' 403
+          return
+        }
+        if ($newPass.Length -lt 12) {
+          Send-Json $res '{"error":"The password must be at least 12 characters."}' 400
+          return
+        }
+        $store = Get-UserStore
+        $targetRecord = $null
+        foreach ($u in @($store.users)) { if ("$($u.user)" -eq $target) { $targetRecord = $u } }
+        if (-not $targetRecord) { Send-Json $res '{"error":"No such user."}' 404; return }
+        $null = Set-UserPassword $target "$newPass" $Script:Pbkdf2Iterations
+        $ended = Revoke-UserSessions $target
+        Write-AuthEvent $clientIp $me 'success' ("password reset for " + $target + " by " + $me + "; " + $ended + " session(s) ended")
+        Send-Json $res (@{ ok = $true; sessionsEnded = $ended } | ConvertTo-Json)
+      }
+      '^/api/users/([^/]+)/remove$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $me = Get-SessionUser $ctx
+        $target = [uri]::UnescapeDataString($Matches[1])
+        $body = $bodyParsed
+        $password = if ($body -and $null -ne $body.password) { "$($body.password)" } else { '' }
+        if (-not $password) {
+          Write-AuthEvent $clientIp $me 'failure' 'user remove: missing password'
+          Send-Json $res '{"error":"Your password is required."}' 400
+          return
+        }
+        if ($target -eq $me) {
+          Write-AuthEvent $clientIp $me 'failure' 'user remove: refused (cannot remove yourself)'
+          Send-Json $res '{"error":"You cannot remove the account you are signed in with."}' 400
+          return
+        }
+        if (-not (Test-LoginAllowed $clientIp)) {
+          Send-Json $res '{"error":"Too many failed attempts from this address. Try again in a few minutes."}' 429
+          return
+        }
+        if (-not (Test-UserPassword $me $password)) {
+          $rec = Register-LoginFailure $clientIp
+          Write-AuthEvent $clientIp $me 'failure' "user remove: wrong caller password (failure $($rec.Count) in window)"
+          Send-Json $res '{"error":"Your password is not correct."}' 403
+          return
+        }
+        $store = Get-UserStore
+        $targetRecord = $null
+        foreach ($u in @($store.users)) { if ("$($u.user)" -eq $target) { $targetRecord = $u } }
+        if (-not $targetRecord) { Send-Json $res '{"error":"No such user."}' 404; return }
+        if (@($store.users).Count -le 1) {
+          Write-AuthEvent $clientIp $me 'failure' 'user remove: refused (last user)'
+          Send-Json $res '{"error":"The last account cannot be removed - the dashboard would have nothing to authenticate against."}' 400
+          return
+        }
+        $null = Remove-UserRecord $target
+        $ended = Revoke-UserSessions $target
+        Write-AuthEvent $clientIp $me 'success' ("user removed: " + $target + "; " + $ended + " session(s) ended")
+        Send-Json $res (@{ ok = $true; sessionsEnded = $ended } | ConvertTo-Json)
+      }
+      '^/api/account/avatar$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $me = Get-SessionUser $ctx
+        $body = $bodyParsed
+        $color = if ($body -and $null -ne $body.color) { "$($body.color)" } else { '' }
+        $initials = if ($body -and $null -ne $body.initials) { "$($body.initials)" } else { '' }
+        $initials = $initials.ToUpper()
+        if (-not (Test-AvatarColor $color)) {
+          Send-Json $res '{"error":"Pick one of the palette colours."}' 400
+          return
+        }
+        if (-not (Test-AvatarInitials $initials)) {
+          Send-Json $res '{"error":"Initials are 1-2 characters of A-Z or 0-9."}' 400
+          return
+        }
+        $null = Set-UserAvatar $me $color $initials
+        Write-AuthEvent $clientIp $me 'success' 'avatar updated'
+        Send-Json $res (@{ ok = $true; color = $color; initials = $initials } | ConvertTo-Json)
+      }
+      # ---- Settings > Audit (v2.5) -------------------------------------------
+      '^/api/audit$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - GET only."}' 405; return }
+        $me = Get-SessionUser $ctx
+        $rules = @(Get-RuleCatalog | Sort-Object key | ForEach-Object {
+          [PSCustomObject]@{
+            key = $_.key
+            title = $_.title
+            state = $_.auditState
+            subcategory = $_.auditSubcategory
+            need = $_.auditRequired
+            detail = $_.auditDetail
+          }
+        })
+        Send-Json $res (@{
+          rules    = $rules
+          elevated = (Test-ProcessElevated)
+          lastChange = (Get-LastAuditChange)
+          backups  = (Get-AuditBackups)
+        } | ConvertTo-Json -Depth 4)
+      }
+      '^/api/audit/preview$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        # preview changes NOTHING by design; it still takes a session (the global gate).
+        # ConvertTo-JsonArray, not raw ConvertTo-Json: an empty result through a
+        # function is $null and UTF8.GetBytes($null) is the 500 this used to be.
+        Send-Json $res (ConvertTo-JsonArray (Get-AuditChangePreview))
+      }
+      '^/api/audit/apply$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $me = Get-SessionUser $ctx
+        if (-not (Test-ProcessElevated)) {
+          Write-AuthEvent $clientIp $me 'failure' 'audit apply: not elevated'
+          Send-Json $res '{"error":"Run Sentinel as Administrator to change the audit policy."}' 409
+          return
+        }
+        $body = $bodyParsed
+        $password = if ($body -and $null -ne $body.password) { "$($body.password)" } else { '' }
+        if (-not $password) {
+          Write-AuthEvent $clientIp $me 'failure' 'audit apply: missing password'
+          Send-Json $res '{"error":"Your password is required."}' 400
+          return
+        }
+        if (-not (Test-LoginAllowed $clientIp)) {
+          Send-Json $res '{"error":"Too many failed attempts from this address. Try again in a few minutes."}' 429
+          return
+        }
+        if (-not (Test-UserPassword $me $password)) {
+          $rec = Register-LoginFailure $clientIp
+          Write-AuthEvent $clientIp $me 'failure' "audit apply: wrong password (failure $($rec.Count) in window)"
+          Send-Json $res '{"error":"Your password is not correct."}' 403
+          return
+        }
+        $ok = Invoke-AuditPolicyApply $me $clientIp
+        if ($ok) {
+          Send-Json $res (@{ ok = $true; changes = (Get-AuditChangePreview).Count } | ConvertTo-Json)
+        } else {
+          Send-Json $res '{"error":"The audit policy could not be read or changed - see the console."}' 500
+        }
+      }
+      '^/api/audit/restore$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $me = Get-SessionUser $ctx
+        if (-not (Test-ProcessElevated)) {
+          Write-AuthEvent $clientIp $me 'failure' 'audit restore: not elevated'
+          Send-Json $res '{"error":"Run Sentinel as Administrator to change the audit policy."}' 409
+          return
+        }
+        $body = $bodyParsed
+        $password = if ($body -and $null -ne $body.password) { "$($body.password)" } else { '' }
+        $backup = if ($body -and $null -ne $body.backup) { "$($body.backup)" } else { '' }
+        if (-not $password -or -not $backup) {
+          Write-AuthEvent $clientIp $me 'failure' 'audit restore: missing fields'
+          Send-Json $res '{"error":"Your password and a backup name are required."}' 400
+          return
+        }
+        # a NAME, never a path: it must be one of the files this tool created
+        if ($backup -ne [IO.Path]::GetFileName($backup) -or $backup -notmatch '^sentinel-audit-backup-[0-9]{8}-[0-9]{6}\.csv$' -or ((Get-AuditBackups) -notcontains $backup)) {
+          Write-AuthEvent $clientIp $me 'failure' ("audit restore: refused backup name " + $backup)
+          Send-Json $res '{"error":"That is not a backup this tool created."}' 400
+          return
+        }
+        if (-not (Test-LoginAllowed $clientIp)) {
+          Send-Json $res '{"error":"Too many failed attempts from this address. Try again in a few minutes."}' 429
+          return
+        }
+        if (-not (Test-UserPassword $me $password)) {
+          $rec = Register-LoginFailure $clientIp
+          Write-AuthEvent $clientIp $me 'failure' "audit restore: wrong password (failure $($rec.Count) in window)"
+          Send-Json $res '{"error":"Your password is not correct."}' 403
+          return
+        }
+        $full = Join-Path $PSScriptRoot $backup
+        $ok = Restore-SentinelAuditPolicy $full
+        if ($ok) {
+          Write-AuthEvent $clientIp $me 'success' ("audit policy restored from " + $backup)
+          Send-Json $res '{"ok":true}'
+        } else {
+          Send-Json $res '{"error":"auditpol /restore failed - see the console."}' 500
         }
       }
       '^/api/coverage\.csv$' {

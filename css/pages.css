@@ -90,3 +90,62 @@ table.data th.sortable:hover { color: var(--text); }
 
 /* the demo marker stays on one line */
 #demoPill { white-space: nowrap; }
+
+/* ---- settings tabs + forms (v2.5) ---- */
+.form-row { margin-bottom: 10px; }
+.form-label { display: block; font-size: var(--fs-cap); color: var(--text-mute); margin-bottom: 4px; }
+.form-hint { font-size: 11.5px; color: var(--text-mute); margin-top: 4px; }
+.form-msg { min-height: 18px; font-size: 12px; }
+.form-msg-ok { color: var(--ok); }
+.form-msg-bad { color: var(--bad); }
+.form-actions { display: flex; gap: 8px; margin-top: 8px; }
+.field-with-btn { display: flex; gap: 6px; align-items: stretch; }
+.field-with-btn .field { flex: 1; }
+
+/* avatar colour swatches */
+.swatch-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+.swatch.on { border-color: var(--text); box-shadow: 0 0 0 2px var(--bg-0); }
+
+/* confirm dialog */
+.confirm-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 60;
+  display: flex; align-items: center; justify-content: center; padding: var(--s-4);
+}
+.confirm-box {
+  background: var(--bg-1); border: 1px solid var(--line-2); border-radius: var(--radius);
+  padding: var(--s-4); width: 460px; max-width: 100%; max-height: 86vh; overflow: auto; box-shadow: var(--shadow);
+}
+.confirm-wide { width: 620px; }
+.confirm-text { color: var(--text-dim); font-size: 13px; margin: 6px 0; }
+.btn-danger { border-color: var(--bad); color: var(--bad); }
+.btn-danger:hover { background: var(--bad-soft); }
+
+/* ---- topbar user menu ---- */
+.user-menu { position: relative; }
+.user-chip {
+  display: flex; align-items: center; gap: 7px; background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius-pill); padding: 4px 10px 4px 4px;
+  cursor: pointer; font-size: 13px;
+}
+.user-chip:hover { border-color: var(--line-2); }
+.user-caret { width: 14px; height: 14px; color: var(--text-mute); }
+.user-avatar {
+  width: 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+}
+.user-dropdown {
+  position: absolute; right: 0; top: calc(100% + 6px); background: var(--bg-1);
+  border: 1px solid var(--line-2); border-radius: var(--radius); min-width: 150px;
+  box-shadow: var(--shadow); z-index: 50; overflow: hidden;
+}
+.user-item {
+  display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--text);
+  padding: 9px 14px; cursor: pointer; font-size: 13px;
+}
+.user-item:hover { background: var(--bg-2); }
+.user-item-logout { border-top: 1px solid var(--line); color: var(--text-dim); }
+
+/* audit tab */
+.audit-preview { margin-top: 10px; }
+.cell-actions { display: flex; gap: 6px; }

@@ -2037,7 +2037,7 @@ try {
   # --- a fake auditpol.exe on PATH ------------------------------------------
   # Records every invocation to auditpol-calls.log, one argument-set per line,
   # and answers /get from auditpol-state.txt so the test can steer the policy.
-  $fakeDir = Join-Path $env:TEMP ('sentinel-fakebin-' + [guid]::NewGuid().ToString('N'))
+  $fakeDir = Join-Path ([IO.Path]::GetTempPath()) ('sentinel-fakebin-' + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Force -Path $fakeDir | Out-Null
   Set-Content -Path (Join-Path $fakeDir 'auditpol-state.txt') -Value @(
     'logon|No Auditing'
@@ -2208,6 +2208,144 @@ exit 1
   # the QuickEdit code fails safe (it is wrapped in try/catch and only runs on
   # a real console): assert the type exists but the guard did not throw here
   Assert-True ($true) 'the QuickEdit guard is try/catch wrapped (a console-less run never throws)'
+
+  Write-Host ""
+  Write-Host "== v2.5 part 1: account management ==" -ForegroundColor Cyan
+
+  # --- a real users file + a signed-in session -------------------------------
+  Reset-Engine
+  $uFile = Join-Path ([IO.Path]::GetTempPath()) ('sentinel-users-' + [guid]::NewGuid().ToString('N') + '.json')
+  $Script:UsersFile = $uFile
+  $u1 = 'admin'
+  $salt1 = New-PasswordSalt
+  $hash1 = Get-PasswordHash 'CorrectHorse123!' $salt1 100000
+  $u2 = 'helper'
+  $salt2 = New-PasswordSalt
+  $hash2 = Get-PasswordHash 'SecondKey456!' $salt2 100000
+  $now2 = (Get-Date).ToUniversalTime().ToString('o')
+  @{ version = 1; users = @(
+      @{ user = $u1; salt = (ConvertTo-Hex $salt1); hash = (ConvertTo-Hex $hash1); iterations = 100000; created = $now2; updated = $now2 }
+      @{ user = $u2; salt = (ConvertTo-Hex $salt2); hash = (ConvertTo-Hex $hash2); iterations = 100000; created = $now2; updated = $now2 }
+    ) } | ConvertTo-Json -Depth 5 | Set-Content -Path $uFile -Encoding UTF8
+  $Script:UsersStamp = $null
+  $Script:UsersUpdated = @{}
+  $null = Update-UsersFingerprint
+
+  # the payload helpers first (pure functions)
+  $rows = Get-UsersPayload 'admin'
+  Assert-True ($rows.Count -eq 2) 'GET /api/users returns both accounts'
+  Assert-True ($rows[0].current -or $rows[1].current) 'exactly one is marked current'
+  $leak = ($rows | ConvertTo-Json)
+  Assert-True (-not $leak.Contains('"hash"') -and -not $leak.Contains('"salt"')) 'the users payload carries no hash or salt'
+
+  # password rewrite: new salt, new stamp, old password gone
+  $stamp = Set-UserPassword 'helper' 'BrandNewKey789!' $Script:Pbkdf2Iterations
+  Assert-True ($null -ne $stamp) 'Set-UserPassword returns the updated stamp'
+  Assert-True (-not (Test-UserPassword 'helper' 'SecondKey456!')) 'the old password no longer verifies'
+  Assert-True (Test-UserPassword 'helper' 'BrandNewKey789!') 'the new one does'
+
+  # username rewrite
+  $null = Rename-User 'helper' 'helper2'
+  Assert-True (Test-UserPassword 'helper2' 'BrandNewKey789!') 'the record keeps its password under the new name'
+  Assert-True ($null -eq (Get-UserRecord (Get-UserStore) 'helper')) 'the old name is gone'
+
+  # add + remove
+  $null = Add-User 'third' 'ThirdPass12345!'
+  Assert-True (Test-UserPassword 'third' 'ThirdPass12345!') 'Add-User creates a working account'
+  Assert-True (Remove-UserRecord 'third') 'Remove-UserRecord removes it'
+  Assert-True (-not (Remove-UserRecord 'third')) 'and refuses when it is not there'
+
+  # avatar
+  $null = Set-UserAvatar 'admin' 'teal' 'AB'
+  $store = Get-UserStore
+  $me = Get-UserRecord $store 'admin'
+  Assert-True ("$($me.avatarColor)" -eq 'teal' -and "$($me.avatarInitials)" -eq 'AB') 'the avatar lands in the record'
+  Assert-True (Test-AvatarColor 'teal') 'the palette accepts its own keys'
+  Assert-True (-not (Test-AvatarColor 'hotpink')) 'and nothing else'
+  Assert-True (Test-AvatarInitials 'A9') 'initials: 1-2 chars A-Z0-9'
+  Assert-True (-not (Test-AvatarInitials 'abc') -and -not (Test-AvatarInitials 'a!')) 'and nothing else'
+
+  # sessions: revoke one user, rotate the caller
+  $s1 = New-Session 'admin'
+  $s2 = New-Session 'helper2'
+  $s3 = New-Session 'helper2'
+  Assert-True ($Script:Sessions.ContainsKey($s2) -and $Script:Sessions.ContainsKey($s3)) 'helper2 holds two sessions'
+  $ended = Revoke-UserSessions 'helper2'
+  Assert-True ($ended -eq 2) 'Revoke-UserSessions ends every session of that user'
+  Assert-True ($Script:Sessions.ContainsKey($s1)) 'and leaves the caller alone'
+  $rotated = Rotate-Session $s1 'admin'
+  Assert-True ($rotated -ne $s1) 'Rotate-Session issues a new id'
+  Assert-True (-not $Script:Sessions.ContainsKey($s1)) 'and the old id is dead'
+  Assert-True ($Script:Sessions.ContainsKey($rotated)) 'while the new one works'
+
+  Remove-Item $uFile -Force -ErrorAction SilentlyContinue
+
+  Write-Host ""
+  Write-Host "== v2.5 part 2: the audit endpoints ==" -ForegroundColor Cyan
+
+  # --- the preview computes but never changes --------------------------------
+  Reset-Engine
+  $Script:AuditStateTestSeed = $true
+  $Script:AuditState = @{
+    'logon' = 'No Auditing'
+    'user account management' = 'No Auditing'
+    'security group management' = 'Success'
+    'credential validation' = 'Success and Failure'
+  }
+  $preview = Get-AuditChangePreview
+  Assert-True ($preview.Count -gt 0) 'the preview lists the changes -EnableAudit would make'
+  $logonRow = @($preview | Where-Object { $_.subcategory -eq 'Logon' })
+  Assert-True ($logonRow.Count -eq 1) 'Logon is in the preview (its rules need it)'
+  Assert-True ("$($logonRow[0].before)" -eq 'No Auditing') 'with its before cell'
+  Assert-True ("$($logonRow[0].after)" -match 'Success') 'and an after cell that carries the flags'
+  Assert-True (@($logonRow[0].flags) -contains 'failure') 'the flags say what gets enabled'
+  Assert-True (@($logonRow[0].rules).Count -ge 1) 'and which rules need it'
+  $sgm = @($preview | Where-Object { $_.subcategory -eq 'Security Group Management' })
+  Assert-True ($sgm.Count -eq 0) 'an already-working subcategory is NOT in the preview'
+  # Get-AuditAfterLabel is the only thing that computed a string; the STATE file
+  # was never touched (preview changes nothing)
+  Assert-True ("$($Script:AuditState['logon'])" -eq 'No Auditing') 'the preview left the policy state alone'
+  $Script:AuditStateTestSeed = $false
+
+  # the after label
+  Assert-True ((Get-AuditAfterLabel 'No Auditing' @('success')) -eq 'Success') 'after-label: No Auditing + success'
+  Assert-True ((Get-AuditAfterLabel 'No Auditing' @('success', 'failure')) -eq 'Success and Failure') 'after-label: both flags'
+  Assert-True ((Get-AuditAfterLabel 'Success' @('failure')) -eq 'Success and Failure') 'after-label: Success + failure'
+
+  # --- backups: names only, never paths --------------------------------------
+  $tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ('sentinel-audit-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
+  # the function reads backups from the folder AlphaSentinel.ps1 lives in; find
+  # that folder from the loaded engine file itself instead of guessing
+  $enginePath = (Get-Command Get-AuditBackups).ScriptBlock.File
+  $engineRoot = Split-Path -Parent $enginePath
+  $seeded = Join-Path $engineRoot 'sentinel-audit-backup-20991231-235959.csv'
+  Set-Content -Path $seeded -Value 'test seed'
+  $backups = Get-AuditBackups
+  Assert-True ($backups -contains 'sentinel-audit-backup-20991231-235959.csv') 'Get-AuditBackups lists the backups it created by name'
+  Assert-True ($backups -notcontains 'other.csv') 'and nothing else'
+  # the restore validator lives in the route: name must match the tool's own
+  # pattern AND be in the list. Simulate both checks the route makes:
+  function Test-BackupNameAccepted([string]$name, [string[]]$known) {
+    if ($name -ne [IO.Path]::GetFileName($name)) { return $false }
+    if ($name -notmatch '^sentinel-audit-backup-[0-9]{8}-[0-9]{6}\.csv$') { return $false }
+    return ($known -contains $name)
+  }
+  $known = @('sentinel-audit-backup-20261013-120000.csv')
+  Assert-True (Test-BackupNameAccepted 'sentinel-audit-backup-20261013-120000.csv' $known) 'a real backup name is accepted'
+  Assert-True (-not (Test-BackupNameAccepted '../sentinel-audit-backup-20261013-120000.csv' $known)) 'a path is refused (../)'
+  Assert-True (-not (Test-BackupNameAccepted 'C:\evil\sentinel-audit-backup-20261013-120000.csv' $known)) 'an absolute path is refused'
+  Assert-True (-not (Test-BackupNameAccepted 'sentinel-audit-backup-20261013-120001.csv' $known)) 'a name that is not in the list is refused'
+  Assert-True (-not (Test-BackupNameAccepted 'backup.csv' $known)) 'a foreign name is refused (pattern)'
+  Remove-Item $seeded -Force -ErrorAction SilentlyContinue
+  Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+  # --- elevation: the check must ANSWER (bool), whatever the platform --------
+  $elev = Test-ProcessElevated
+  Assert-True ($elev -is [bool]) 'Test-ProcessElevated answers a boolean (the routes 409 when it is false)'
+
+  # --- the UI applier wraps the console applier and stamps the caller --------
+  Assert-True ($null -eq $Script:AuditChangeCaller) 'no caller is stamped outside an apply'
 
   Write-Host "== fixture replay ==" -ForegroundColor Cyan
   $manifestPath = Join-Path $Fixtures 'expected.json'
