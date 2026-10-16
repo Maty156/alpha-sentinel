@@ -420,6 +420,77 @@ try {
   Assert-Count 'kerberoasting' 1 'three distinct RC4 SPNs by one account -> one alert'
   Assert-True (@($script:Raised | Where-Object { $_.RuleKey -eq 'kerberoasting' })[0].Severity -eq 'High') '  ...escalated in place to High at 3 distinct SPNs'
 
+  # --- firewall_disabled (4950, whole profile OFF) ---------------------------
+  Reset-Engine
+  $f1 = Feed 4950 @{ SubjectUserName = 'admin'; ProfileChanged = 'Domain'; SettingType = 'EnableFirewall'; SettingValue = 'No' }
+  Assert-Fired 'firewall_disabled' '4950 EnableFirewall -> No (profile OFF) fires'
+  Assert-True ($f1 -and $f1.Severity -eq 'Critical') '  ...at Critical'
+  Assert-True ($f1 -and "$($f1.Description)" -match 'Domain') '  ...and names the profile'
+  Reset-Engine
+  $null = Feed 4950 @{ SubjectUserName = 'admin'; ProfileChanged = 'Domain'; SettingType = 'Default Outbound Action'; SettingValue = 'Block' }
+  Assert-Silent 'firewall_disabled' '4950 for a different setting (Default Outbound Action) is silent'
+  Reset-Engine
+  $null = Feed 4950 @{ SubjectUserName = 'admin'; ProfileChanged = 'Private'; SettingType = 'EnableFirewall'; SettingValue = 'Yes' }
+  Assert-Silent 'firewall_disabled' '4950 EnableFirewall -> Yes (turning it ON) is silent'
+  Reset-Engine
+  # the tolerant shapes: the netsh-style label some builds write, and the raw 0
+  $null = Feed 4950 @{ SubjectUserName = 'admin'; ProfileChanged = 'Public'; SettingType = 'Enable Windows Firewall'; SettingValue = 'No' }
+  Assert-Fired 'firewall_disabled' '  the "Enable Windows Firewall"/No spelling fires too'
+  Reset-Engine
+  $null = Feed 4950 @{ SubjectUserName = 'admin'; ProfileChanged = 'Public'; SettingType = 'EnableFirewall'; SettingValue = '0' }
+  Assert-Fired 'firewall_disabled' '  and the numeric 0 form fires (older builds)'
+  # dedupe: per profile, 15 minutes
+  Reset-Engine
+  $null = Feed 4950 @{ SubjectUserName = 'admin'; ProfileChanged = 'Domain'; SettingType = 'EnableFirewall'; SettingValue = 'No' }
+  $null = Feed 4950 @{ SubjectUserName = 'admin'; ProfileChanged = 'Domain'; SettingType = 'EnableFirewall'; SettingValue = 'No' }
+  Assert-Count 'firewall_disabled' 1 'a second identical disable inside the window is deduped'
+  Reset-Engine
+  $null = Feed 4950 @{ SubjectUserName = 'admin'; ProfileChanged = 'Domain'; SettingType = 'EnableFirewall'; SettingValue = 'No' }
+  $null = Feed 4950 @{ SubjectUserName = 'admin'; ProfileChanged = 'Public'; SettingType = 'EnableFirewall'; SettingValue = 'No' }
+  Assert-Count 'firewall_disabled' 2 'a DIFFERENT profile is a separate incident'
+  # the rule never steals from the separate 4946-4949 rule
+  Reset-Engine
+  $null = Feed 4946 @{ SubjectUserName = 'administrator'; RuleName = 'Allow RDP inbound' }
+  Assert-Fired 'firewall_rule_modified' '4946 still fires through the separate rule'
+  Reset-Engine
+  $null = Feed 4950 @{ SubjectUserName = 'administrator'; ProfileChanged = 'Domain'; SettingType = 'EnableFirewall'; SettingValue = 'No' }
+  Assert-Silent 'firewall_rule_modified' 'and a 4950 never raises firewall_rule_modified'
+
+  # --- anonymous_smb_session (4624 type 3, no credentials) -------------------
+  Reset-Engine
+  $a1 = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '203.0.113.66' }
+  Assert-Fired 'anonymous_smb_session' 'a type-3 ANONYMOUS LOGON fires'
+  Assert-True ($a1 -and $a1.Severity -eq 'Medium') '  ...at Medium'
+  Assert-True ($a1 -and "$($a1.Description)" -match [regex]::Escape('203.0.113.66')) '  ...and names the source'
+  Reset-Engine
+  $null = Feed 4624 @{ TargetUserName = ''; TargetUserSid = ''; LogonType = '3'; IpAddress = '203.0.113.67' }
+  Assert-Fired 'anonymous_smb_session' 'an EMPTY target name on a type-3 logon fires too'
+  Reset-Engine
+  $null = Feed 4624 @{ TargetUserName = 'jsmith'; TargetUserSid = 'S-1-5-21-1-2-3-500'; LogonType = '3'; IpAddress = '10.0.0.44' }
+  Assert-Silent 'anonymous_smb_session' 'a NAMED account on a type-3 logon is not a null session'
+  Reset-Engine
+  $null = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '10'; IpAddress = '203.0.113.66' }
+  Assert-Silent 'anonymous_smb_session' 'an anonymous logon that is NOT type 3 stays out'
+  Reset-Engine
+  $null = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '127.0.0.1' }
+  $null = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '::1' }
+  $null = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '' }
+  Assert-Silent 'anonymous_smb_session' 'loopback and address-less sessions stay out (nothing to hunt)'
+  # dedupe: per source IP, one hour
+  Reset-Engine
+  $null = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '203.0.113.66' }
+  $null = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '203.0.113.66' }
+  $null = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '203.0.113.66' }
+  Assert-Count 'anonymous_smb_session' 1 'a burst from ONE address is deduped to one alert (per IP per hour)'
+  Reset-Engine
+  $null = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '203.0.113.66' }
+  $null = Feed 4624 @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '203.0.113.99' }
+  Assert-Count 'anonymous_smb_session' 2 'a SECOND source is a separate alert'
+  # a named type-3 admin logon still belongs to suspicious_remote_logon, not here
+  Reset-Engine
+  $null = Feed 4624 @{ TargetUserName = 'DA_john'; LogonType = '3'; IpAddress = '10.0.0.77' }
+  Assert-Fired 'suspicious_remote_logon' 'the suspicious_remote_logon rule is untouched by the new one'
+
   Write-Host ""
   Write-Host "== self-test coverage ==" -ForegroundColor Cyan
   Reset-Engine
@@ -432,7 +503,7 @@ try {
   $distinct = @($firedKeys | Select-Object -Unique)
   $missing = @($RuleMeta.Keys | Where-Object { $distinct -notcontains $_ })
   Assert-True ($distinct.Count -eq $RuleMeta.Count) ('self-test fires ' + $distinct.Count + ' of ' + $RuleMeta.Count + ' rule families (missing: ' + ($missing -join ', ') + ')')
-  Assert-True ($RuleMeta.Count -eq 28) ('rule catalog has exactly 28 families (actual: ' + $RuleMeta.Count + ')')
+  Assert-True ($RuleMeta.Count -eq 30) ('rule catalog has exactly 30 families (actual: ' + $RuleMeta.Count + ')')
   $auditMissing = @($RuleMeta.Keys | Where-Object { -not $RuleAudit.ContainsKey($_) })
   $auditExtra = @($RuleAudit.Keys | Where-Object { -not $RuleMeta.ContainsKey($_) })
   Assert-True ($auditMissing.Count -eq 0 -and $auditExtra.Count -eq 0) ('preflight map covers every rule family (missing: ' + ($auditMissing -join ',') + ' extra: ' + ($auditExtra -join ',') + ')')
@@ -496,7 +567,7 @@ try {
   Assert-True ($text -notmatch 'SELF-TEST') 'self-test alert does not reach the engagement CSV'
   Assert-True ($text -match "'=cmd") 'a hostile account name is prefixed in the CSV'
   $catalog = @(Get-RuleCatalog)
-  Assert-True ($catalog.Count -eq 28) 'rule catalog returns 28 entries'
+  Assert-True ($catalog.Count -eq 30) 'rule catalog returns 30 entries'
   Assert-True (@($catalog | Where-Object { $_.key -eq 'account_created' })[0].fired -eq 1) 'coverage fired-count excludes the self-test row'
   Assert-True (@($catalog | Where-Object { -not $_.PSObject.Properties['auditState'] }).Count -eq 0) 'every catalog row carries an auditState'
 
@@ -541,7 +612,7 @@ try {
   Assert-True (-not (Test-UserPassword 'maty' 'AdministoolPassword123!')) 'a wrong password is rejected'
   Assert-True (-not (Test-UserPassword 'nosuchuser' 'AdminToolPassword123!')) 'an unknown user is rejected'
   Assert-True (-not (Test-UserPassword 'maty' '')) 'an empty password is rejected'
-  Assert-True (@($RuleMeta.Keys).Count -eq 28) 'the rule catalog is untouched by the auth tests'
+  Assert-True (@($RuleMeta.Keys).Count -eq 30) 'the rule catalog is untouched by the auth tests'
 
   # --- sessions ---
   $sid = New-Session 'maty'

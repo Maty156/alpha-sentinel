@@ -79,7 +79,7 @@ auditpol /set /subcategory:"Security System Extension" /success:enable          
 auditpol /set /subcategory:"Registry" /success:enable                                   # 4657
 auditpol /set /subcategory:"Audit Policy Change" /success:enable                        # 4719
 auditpol /set /subcategory:"Security State Change" /success:enable                      # 4616
-auditpol /set /subcategory:"MPSSVC Rule-Level Policy Change" /success:enable            # 4946 4947 4948 4949
+auditpol /set /subcategory:"MPSSVC Rule-Level Policy Change" /success:enable            # 4946 4947 4948 4949 4950
 ```
 
 No `auditpol` entry is needed for: **1100 / 1102** (the Eventlog service writes
@@ -350,7 +350,16 @@ same `rule_key`.
 | Kerberos attacks / directory | kerberoasting, asrep_roasting, dcsync_replication, ldap_recon | 4769, 4768, 4662, 5141 |
 | Logon / services | suspicious_remote_logon, explicit_credential_logon, service_abuse | 4624, 4648, 4697/7045 |
 | Persistence | scheduled_task_created, registry_persistence | 4698, 4657 |
-| Anti-forensics / defense evasion | log_tampering, audit_policy_changed, eventlog_service_stopped, defender_disabled, firewall_rule_modified, system_time_changed, special_privileges_assigned | 1102, 4719, 1100, 5001/5010/5012, 4946-4949, 4616, 4672 |
+| Anti-forensics / defense evasion | log_tampering, audit_policy_changed, eventlog_service_stopped, defender_disabled, firewall_disabled, firewall_rule_modified, system_time_changed, special_privileges_assigned | 1102, 4719, 1100, 5001/5010/5012, 4950, 4946-4949, 4616, 4672 |
+| Discovery | anonymous_smb_session, ldap_recon | 4624 (type 3, no account), 4662, 5141 |
+
+Event **4950** (a whole firewall profile turned off) shares the **MPSSVC
+Rule-Level Policy Change** audit subcategory with 4946-4949, so the same
+`auditpol` entry covers both - no extra subcategory is needed. The rule reads
+the real event fields (`ProfileChanged`, `SettingType`, `SettingValue`) and
+fires only on `SettingType = EnableFirewall` with value `No` (also accepting
+the `Enable Windows Firewall` spelling some builds write and the numeric `0`
+form from the oldest ones); every other 4950 setting change is informational.
 
 Two rules carry a severity ladder rather than a fixed level:
 
@@ -421,7 +430,7 @@ its secret-free guarantee), the v2.4.1 round (an idle poll is not an error and a
 missing log is skipped, not degraded; the audit-policy setup's admin refusal, safe
 one-argument invocation, backup-first ordering, idempotence and restore; the exact
 alertCount arithmetic on hosts, IPs and accounts; and that a shared destination
-host no longer merges chains), then replays all 19 fixtures in `tests/fixtures/`.
+host no longer merges chains), then replays all 23 fixtures in `tests/fixtures/`.
 See `tests/README.md`.
 
 ## Forwarding to the web platform

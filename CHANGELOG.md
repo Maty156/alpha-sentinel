@@ -1,5 +1,49 @@
 ﻿# Changelog
 
+## v2.5.1
+
+Two new detection families - the 28-rule set becomes **30**. **883 assertions**
+(`tests/run-tests.ps1`), up from 857.
+
+### firewall_disabled (NEW, Critical)
+
+Event **4950** "A Windows Firewall setting has changed", alerting only when the
+change turned a whole profile OFF: `SettingType = EnableFirewall` with
+`SettingValue = No` (the `Enable Windows Firewall` spelling some builds write
+and the numeric `0` form from the oldest ones are accepted too). Severity
+Critical, `T1562.004 - Impair Defenses: Disable or Modify System Firewall`,
+deduped per profile. **firewall_rule_modified (4946-4949) stays a separate
+rule** - it covers individual rule add/modify/delete/restore and is never
+raised by a 4950.
+
+The event's field names were confirmed against Microsoft's own event-XML
+sample (`ProfileChanged`, `SettingType`, `SettingValue`) before the parser was
+written. 4950 shares the **MPSSVC Rule-Level Policy Change** audit subcategory
+with 4946-4949, so no new `auditpol` entry is needed - documented in the rule,
+the README rule table and the preflight list.
+
+### anonymous_smb_session (NEW, Medium)
+
+Event **4624** with `LogonType 3` and no credentials at all: `ANONYMOUS LOGON`,
+an empty target name, or the anonymous SID `S-1-5-7` - the shape of pre-auth AD
+enumeration (SID brute-forcing, RID cycling, null-session tooling). Deduped
+**per source IP per hour** because printers and scanners can be constant
+anonymous talkers. Remediation: "Disable null session access
+(RestrictAnonymous) unless explicitly required". Mapped to `T1087 - Account
+Discovery`, consistent with the other discovery rule (ldap_recon lists T1087
+among its techniques).
+
+### Tests and counts
+
+- Four new fixture files (fire / no-fire for each rule) and `expected.json`
+  entries; the fixture-replay count is 19 -> 23.
+- The self-test suite gained probes for both rules, so the self-test fires all
+  30 families.
+- `rulesTotal` everywhere comes from `$RuleMeta.Count` (30); the Detection
+  Rules page header, README rule table (with the 4950 subcategory note) and
+  the auditpol preflight list are updated. 4950 is added to the XPath
+  pre-filter and the Security-channel event list.
+
 ## v2.5.0
 
 Settings that DO things - account management and the audit policy from the UI.

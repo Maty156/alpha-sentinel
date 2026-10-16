@@ -1,148 +1,181 @@
 {
-  "dcsync-4662-properties.xml": {
-    "expect": [
-      "dcsync_replication"
-    ],
-    "forbid": [
-      "ldap_recon"
-    ],
-    "note": "The exact shape a real 4662 has: the replication GUID lives in Properties and ObjectType holds the domain class GUID. The pre-fix rule matched ObjectType and could never fire."
-  },
-  "dcsync-4662-dc-machine-account.xml": {
-    "expect": [],
-    "forbid": [
-      "dcsync_replication",
-      "ldap_recon"
-    ],
-    "note": "A DC replicating as its machine account is normal AD behaviour - must not alert, and must not be counted as enumeration either."
-  },
-  "ntlm-4776-successful-validations.xml": {
-    "expect": [],
-    "forbid": [
-      "ntlm_failed_auth"
-    ],
-    "note": "8x 4776 with Status 0x0 (credentials VALIDATED). The pre-fix rule never read Status, so healthy NTLM traffic raised a High alert."
-  },
-  "ntlm-4776-failed-validations.xml": {
-    "expect": [
-      "ntlm_failed_auth"
-    ],
-    "forbid": [],
-    "note": "Genuine failure burst - must still fire."
-  },
-  "uac-4738-no-net-change.xml": {
-    "expect": [],
-    "forbid": [
-      "account_control_changed"
-    ],
-    "note": "The account already had DONT_REQ_PREAUTH before this edit. The pre-fix rule tested the NEW flags only, so any edit re-alerted at Critical."
-  },
-  "uac-4738-preauth-removed.xml": {
-    "expect": [
-      "account_control_changed"
-    ],
-    "forbid": [],
-    "note": "DONT_REQ_PREAUTH actually gained -> AS-REP roastable."
-  },
-  "uac-4738-already-disabled.xml": {
-    "expect": [],
-    "forbid": [
-      "account_control_changed"
-    ],
-    "note": "Edit on an account that is already disabled - no flag moved."
-  },
-  "kerberoasting-4769-mixed.xml": {
-    "expect": [
-      "kerberoasting"
-    ],
-    "forbid": [],
-    "note": "krbtgt and the machine SPN HOST/PC01 are excluded; the single user SPN MSSQLSvc/sql01 with RC4 is the roast, reported at Medium because one RC4 ticket on its own is not proof of a sweep.",
-    "expectSeverity": {
-      "kerberoasting": "Medium"
-    }
-  },
-  "kerberoasting-4769-failure.xml": {
-    "expect": [],
-    "forbid": [
-      "kerberoasting"
-    ],
-    "note": "Failed ticket request (Status 0x6) - nothing was issued, nothing to crack."
-  },
-  "asrep-4768-single-request.xml": {
-    "expect": [
-      "asrep_roasting"
-    ],
-    "forbid": [],
-    "note": "ONE no-preauth TGT request (PreAuthType 0). The pre-fix rule waited for 3 hits on the same account, so a normal one-shot roast was missed."
-  },
-  "eventlog-1100-service-stopped.xml": {
-    "expect": [
-      "eventlog_service_stopped"
-    ],
-    "forbid": [],
-    "note": "Microsoft's reference XML for 1100 has <Channel>Security</Channel>. Polling the System log for it (pre-fix) meant this rule could never fire."
-  },
-  "account-created-4720-computer.xml": {
-    "expect": [],
-    "forbid": [
-      "account_created"
-    ],
-    "note": "Machine account created by a domain join - routine."
-  },
-  "account-created-4720-user.xml": {
-    "expect": [
-      "account_created"
-    ],
-    "forbid": [],
-    "note": "A user account created by an administrator."
-  },
-  "privesc-4728-two-accounts.xml": {
-    "expect": [
-      "privilege_escalation"
-    ],
-    "expectCount": 2,
-    "forbid": [],
-    "note": "Two DIFFERENT accounts added to Domain Admins. The pre-fix dedupe key was the rule key alone, so the second add inside 15 minutes was swallowed."
-  },
-  "logon-4624-service-account-type3.xml": {
-    "expect": [],
-    "forbid": [
-      "suspicious_remote_logon"
-    ],
-    "note": "Routine type-3 network logon by a service account - this is the noise the pre-fix rule produced."
-  },
-  "logon-4624-domain-admin-rdp.xml": {
-    "expect": [
-      "suspicious_remote_logon"
-    ],
-    "forbid": [],
-    "note": "RDP by an admin-style account."
-  },
-  "uac-4738-delegation-granted.xml": {
-    "expect": [
-      "account_control_changed"
-    ],
-    "forbid": [],
-    "expectSeverity": {
-      "account_control_changed": "High"
-    },
-    "note": "DONT_REQ_PREAUTH was already absent; what changed is TRUSTED_FOR_DELEGATION (0x80000) being newly set. Unconstrained delegation lets an attacker who owns the account impersonate any user to any service, so it is reported at High - and ONLY when the bit actually moved."
-  },
-  "uac-4738-delegation-unchanged.xml": {
-    "expect": [],
-    "forbid": [
-      "account_control_changed"
-    ],
-    "note": "The account already had unconstrained delegation before this edit. The rule compares new AND NOT old, so re-saving the account is silent."
-  },
-  "kerberoasting-4769-sweep.xml": {
-    "expect": [
-      "kerberoasting"
-    ],
-    "expectCount": 1,
-    "expectSeverity": {
-      "kerberoasting": "High"
-    },
-    "note": "Three distinct user-owned RC4 service principals requested by one account inside the window: a kerberoasting sweep. One alert, escalated in place to High (a single SPN is only Medium)."
+ "dcsync-4662-properties.xml": {
+  "expect": [
+   "dcsync_replication"
+  ],
+  "forbid": [
+   "ldap_recon"
+  ],
+  "note": "The exact shape a real 4662 has: the replication GUID lives in Properties and ObjectType holds the domain class GUID. The pre-fix rule matched ObjectType and could never fire."
+ },
+ "dcsync-4662-dc-machine-account.xml": {
+  "expect": [],
+  "forbid": [
+   "dcsync_replication",
+   "ldap_recon"
+  ],
+  "note": "A DC replicating as its machine account is normal AD behaviour - must not alert, and must not be counted as enumeration either."
+ },
+ "ntlm-4776-successful-validations.xml": {
+  "expect": [],
+  "forbid": [
+   "ntlm_failed_auth"
+  ],
+  "note": "8x 4776 with Status 0x0 (credentials VALIDATED). The pre-fix rule never read Status, so healthy NTLM traffic raised a High alert."
+ },
+ "ntlm-4776-failed-validations.xml": {
+  "expect": [
+   "ntlm_failed_auth"
+  ],
+  "forbid": [],
+  "note": "Genuine failure burst - must still fire."
+ },
+ "uac-4738-no-net-change.xml": {
+  "expect": [],
+  "forbid": [
+   "account_control_changed"
+  ],
+  "note": "The account already had DONT_REQ_PREAUTH before this edit. The pre-fix rule tested the NEW flags only, so any edit re-alerted at Critical."
+ },
+ "uac-4738-preauth-removed.xml": {
+  "expect": [
+   "account_control_changed"
+  ],
+  "forbid": [],
+  "note": "DONT_REQ_PREAUTH actually gained -> AS-REP roastable."
+ },
+ "uac-4738-already-disabled.xml": {
+  "expect": [],
+  "forbid": [
+   "account_control_changed"
+  ],
+  "note": "Edit on an account that is already disabled - no flag moved."
+ },
+ "kerberoasting-4769-mixed.xml": {
+  "expect": [
+   "kerberoasting"
+  ],
+  "forbid": [],
+  "note": "krbtgt and the machine SPN HOST/PC01 are excluded; the single user SPN MSSQLSvc/sql01 with RC4 is the roast, reported at Medium because one RC4 ticket on its own is not proof of a sweep.",
+  "expectSeverity": {
+   "kerberoasting": "Medium"
   }
+ },
+ "kerberoasting-4769-failure.xml": {
+  "expect": [],
+  "forbid": [
+   "kerberoasting"
+  ],
+  "note": "Failed ticket request (Status 0x6) - nothing was issued, nothing to crack."
+ },
+ "asrep-4768-single-request.xml": {
+  "expect": [
+   "asrep_roasting"
+  ],
+  "forbid": [],
+  "note": "ONE no-preauth TGT request (PreAuthType 0). The pre-fix rule waited for 3 hits on the same account, so a normal one-shot roast was missed."
+ },
+ "eventlog-1100-service-stopped.xml": {
+  "expect": [
+   "eventlog_service_stopped"
+  ],
+  "forbid": [],
+  "note": "Microsoft's reference XML for 1100 has <Channel>Security</Channel>. Polling the System log for it (pre-fix) meant this rule could never fire."
+ },
+ "account-created-4720-computer.xml": {
+  "expect": [],
+  "forbid": [
+   "account_created"
+  ],
+  "note": "Machine account created by a domain join - routine."
+ },
+ "account-created-4720-user.xml": {
+  "expect": [
+   "account_created"
+  ],
+  "forbid": [],
+  "note": "A user account created by an administrator."
+ },
+ "privesc-4728-two-accounts.xml": {
+  "expect": [
+   "privilege_escalation"
+  ],
+  "expectCount": 2,
+  "forbid": [],
+  "note": "Two DIFFERENT accounts added to Domain Admins. The pre-fix dedupe key was the rule key alone, so the second add inside 15 minutes was swallowed."
+ },
+ "logon-4624-service-account-type3.xml": {
+  "expect": [],
+  "forbid": [
+   "suspicious_remote_logon"
+  ],
+  "note": "Routine type-3 network logon by a service account - this is the noise the pre-fix rule produced."
+ },
+ "logon-4624-domain-admin-rdp.xml": {
+  "expect": [
+   "suspicious_remote_logon"
+  ],
+  "forbid": [],
+  "note": "RDP by an admin-style account."
+ },
+ "uac-4738-delegation-granted.xml": {
+  "expect": [
+   "account_control_changed"
+  ],
+  "forbid": [],
+  "expectSeverity": {
+   "account_control_changed": "High"
+  },
+  "note": "DONT_REQ_PREAUTH was already absent; what changed is TRUSTED_FOR_DELEGATION (0x80000) being newly set. Unconstrained delegation lets an attacker who owns the account impersonate any user to any service, so it is reported at High - and ONLY when the bit actually moved."
+ },
+ "uac-4738-delegation-unchanged.xml": {
+  "expect": [],
+  "forbid": [
+   "account_control_changed"
+  ],
+  "note": "The account already had unconstrained delegation before this edit. The rule compares new AND NOT old, so re-saving the account is silent."
+ },
+ "kerberoasting-4769-sweep.xml": {
+  "expect": [
+   "kerberoasting"
+  ],
+  "expectCount": 1,
+  "expectSeverity": {
+   "kerberoasting": "High"
+  },
+  "note": "Three distinct user-owned RC4 service principals requested by one account inside the window: a kerberoasting sweep. One alert, escalated in place to High (a single SPN is only Medium)."
+ },
+ "firewall-4950-profile-disabled.xml": {
+  "expect": [
+   "firewall_disabled"
+  ],
+  "forbid": [
+   "firewall_rule_modified"
+  ],
+  "note": "The real 4950 shape (Microsoft Learn event XML): ProfileChanged + SettingType + SettingValue. SettingType 'EnableFirewall' with value 'No' is the whole-profile OFF switch - Critical, T1562.004. Shares the MPSSVC Rule-Level Policy Change subcategory with 4946-4949, so no new auditpol entry is needed."
+ },
+ "firewall-4950-benign-settings.xml": {
+  "expect": [],
+  "forbid": [
+   "firewall_disabled",
+   "firewall_rule_modified"
+  ],
+  "note": "A 4950 for a non-EnableFirewall setting (Default Outbound Action -> Block) and an EnableFirewall=Yes (turning it ON) - neither is a disable, neither may alert."
+ },
+ "logon-4624-anonymous-smb.xml": {
+  "expect": [
+   "anonymous_smb_session"
+  ],
+  "forbid": [
+   "suspicious_remote_logon"
+  ],
+  "note": "Type-3 logon with TargetUserSid S-1-5-7 / ANONYMOUS LOGON - the null-session shape RID-cycling tooling produces. Deduped per source IP per hour."
+ },
+ "logon-4624-named-network-logon.xml": {
+  "expect": [],
+  "forbid": [
+   "anonymous_smb_session"
+  ],
+  "note": "A type-3 logon with a REAL account - ordinary network traffic, must not be treated as a null session."
+ }
 }

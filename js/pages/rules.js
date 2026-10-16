@@ -1,4 +1,4 @@
-/* pages/rules.js - OWNER: the Detection Rules page. All 28 families with their
+/* pages/rules.js - OWNER: the Detection Rules page. All 30 families with their
    audit-policy state: Working, or BLIND with the reason and the auditpol command
    that fixes it. */
 (function () {

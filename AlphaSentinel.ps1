@@ -5,7 +5,7 @@
 # Like Wazuh's agent+dashboard model, but as ONE script with zero dependencies:
 #
 #   - Runs in the BACKGROUND (service-style, no window needed): polls the
-#     Windows event logs every -PollSeconds and runs 28 AD/network detection
+#     Windows event logs every -PollSeconds and runs 30 AD/network detection
 #     rule families (Kerberos attacks, spraying, brute force, privilege
 #     escalation, DCSync, directory enumeration, persistence, defense evasion,
 #     anti-forensics), and keeps alerts in memory + a history CSV so acks
@@ -44,7 +44,7 @@
 #   auditpol /set /subcategory:"Registry" /success:enable                                   ; 4657
 #   auditpol /set /subcategory:"Audit Policy Change" /success:enable                        ; 4719
 #   auditpol /set /subcategory:"Security State Change" /success:enable                      ; 4616
-#   auditpol /set /subcategory:"MPSSVC Rule-Level Policy Change" /success:enable            ; 4946 4947 4948 4949
+#   auditpol /set /subcategory:"MPSSVC Rule-Level Policy Change" /success:enable            ; 4946 4947 4948 4949 4950
 #
 #   # 1100 / 1102 are written by the Eventlog service to the SECURITY log and
 #   # are not gated by an Advanced Audit subcategory; 7045 comes from the
@@ -206,7 +206,7 @@ try {
 } catch { }
 
 # ============================================================
-# DETECTION RULES (28 families)
+# DETECTION RULES (30 families)
 # ============================================================
 # Mirrors alpha/utils/detectionRules.js. Keys must match exactly so an alert
 # promoted in either product lands on the same rule_key.
@@ -281,6 +281,8 @@ $RuleAudit = @{
   audit_policy_changed        = @{ Sub = @('Audit Policy Change'); Need = 'Success' }
   eventlog_service_stopped    = @{ Sub = $null; Need = $null }
   defender_disabled           = @{ Sub = $null; Need = $null }
+  firewall_disabled           = @{ Sub = @('MPSSVC Rule-Level Policy Change'); Need = 'Success' }
+  anonymous_smb_session       = @{ Sub = @('Logon'); Need = 'Success' }
   firewall_rule_modified      = @{ Sub = @('MPSSVC Rule-Level Policy Change'); Need = 'Success' }
   system_time_changed         = @{ Sub = @('Security State Change'); Need = 'Success' }
   special_privileges_assigned = @{ Sub = @('Special Logon'); Need = 'Success' }
@@ -480,6 +482,34 @@ $RuleMeta = @{
   }
 
   # ---- Impact / configuration ----
+  # Event 4950 shares the 'MPSSVC Rule-Level Policy Change' subcategory with
+  # 4946-4949 (Microsoft Learn lists it under that subcategory), so enabling the
+  # audit subcategory for firewall_rule_modified covers this rule too - no new
+  # subcategory is needed. The fields are the ones the real event carries
+  # (Microsoft Learn event XML): ProfileChanged, SettingType, SettingValue; the
+  # firewall-off case is SettingType 'EnableFirewall' with SettingValue 'No'
+  # ('Enable Windows Firewall'/'No' on some builds, '0' on the oldest ones).
+  firewall_disabled = @{
+    Severity = 'Critical'; Title = 'Windows Firewall Profile Disabled'
+    EventId = '4950'; EventIds = @('4950'); DedupeMinutes = 15
+    Mitre = 'T1562.004 - Impair Defenses: Disable or Modify System Firewall'; Category = 'Defense Evasion'
+    Description = 'A whole firewall profile was turned OFF (SettingType EnableFirewall, value No). This is the classic pre-attack move - ransomware and lateral-movement tooling disable the firewall before spreading. Individual rule changes are covered by firewall_rule_modified; this rule only fires for the profile on/off switch.'
+    Remediation = 'Re-enable the profile (netsh advfirewall set <profile> state on), check Group Policy is enforcing the baseline, and investigate what changed it - assume the host was being prepared for lateral movement.'
+  }
+
+  # ---- Discovery ----
+  # A type-3 (network/SMB) logon with no credentials at all: the ANONYMOUS
+  # account. Pre-auth enumeration (RID cycling, SID brute-forcing, null-session
+  # tooling) arrives exactly like this. Deduped per source IP per hour because
+  # some networks carry constant anonymous traffic from printers and scanners.
+  anonymous_smb_session = @{
+    Severity = 'Medium'; Title = 'Anonymous SMB / Network Session'
+    EventId = '4624'; EventIds = @('4624'); DedupeMinutes = 60
+    Mitre = 'T1087 - Account Discovery'; Category = 'Discovery'
+    Description = 'A network logon (type 3) with no account at all - ANONYMOUS LOGON / a null session. Classic pre-auth AD enumeration: SID brute-forcing, RID cycling and null-session tooling all start here.'
+    Remediation = 'Disable null session access (RestrictAnonymous) unless explicitly required, then hunt the source for enumeration tooling.'
+  }
+
   firewall_rule_modified = @{
     Severity = 'Medium'; Title = 'Windows Firewall Rule Added or Modified'
     EventId = '4946/4947/4948/4949'; EventIds = @('4946', '4947', '4948', '4949'); DedupeMinutes = 15
@@ -2100,6 +2130,7 @@ function Get-NormalizedEvent($e) {
       $f.sourceIp        = Get-Field $xml "IpAddress"
       $f.logonType       = Get-Field $xml "LogonType"
       $f.workstationName = Get-Field $xml "WorkstationName"
+      $f.targetUserSid   = Get-Field $xml "TargetUserSid"
     }
     { $_ -in 4728, 4729, 4732, 4733, 4756 } {
       $f.accountName     = Get-Field $xml "MemberName"
@@ -2175,9 +2206,14 @@ function Get-NormalizedEvent($e) {
       $f.registryKey       = Get-Field $xml "ObjectName"
       $f.registryValueName = Get-Field $xml "ObjectValueName"
     }
-    { $_ -in 4946, 4947, 4948, 4949 } {
+    { $_ -in 4946, 4947, 4948, 4949, 4950 } {
       $f.subjectUserName = Get-Field $xml "SubjectUserName"
       $f.ruleName        = Get-Field $xml "RuleName"
+    }
+    4950 {
+      $f.profileChanged = Get-Field $xml "ProfileChanged"
+      $f.settingType    = Get-Field $xml "SettingType"
+      $f.settingValue   = Get-Field $xml "SettingValue"
     }
     4672 {
       $f.accountName   = Get-Field $xml "SubjectUserName"
@@ -2479,6 +2515,19 @@ function Evaluate-Event($e) {
       $type = "$($f.logonType)"
       $account = "$($f.accountName)"
       $srcIp = "$($f.sourceIp)"
+      # a NULL session: type 3 with no credentials at all - the ANONYMOUS LOGON
+      # name, an empty target, or the anonymous SID S-1-5-7. Checked FIRST, so
+      # an anonymous logon is never mistaken for a service or admin logon.
+      if ($type -eq '3') {
+        $anon = ($account -eq '' -or $account -eq 'ANONYMOUS LOGON' -or "$($f.targetUserSid)" -eq 'S-1-5-7')
+        if ($anon -and $srcIp -and $srcIp -ne '-' -and $srcIp -ne '::1' -and $srcIp -ne '127.0.0.1') {
+          # deduped per source IP per hour (DedupeMinutes = 60): printers,
+          # scanners and monitoring boxes can be constant anonymous talkers
+          if (-not (Should-Dedupe 'anonymous_smb_session' $srcIp)) {
+            return New-Alert 'anonymous_smb_session' "A null (anonymous) SMB session from $srcIp - pre-auth enumeration (RID cycling, SID brute-forcing, null-session tooling) starts like this." $null $f (Get-DedupeKey 'anonymous_smb_session' $srcIp) $evtTime
+          }
+        }
+      }
       $isRdp = ($type -eq '10')
       # Type 3 (network) is how services, backups, SMB and management tooling
       # all log on. Reporting every one of those was the noise this rule caused,
@@ -2586,6 +2635,22 @@ function Evaluate-Event($e) {
       if (-not (Should-Dedupe 'firewall_rule_modified' $ent)) {
         $action = switch ($id) { 4946 { 'added' } 4948 { 'deleted' } default { 'modified' } }
         return New-Alert 'firewall_rule_modified' "A Windows Firewall rule was $action on $($f.hostname) by `"$($f.subjectUserName)`" - rule `"$($f.ruleName)`"." $null $f (Get-DedupeKey 'firewall_rule_modified' $ent) $evtTime
+      }
+    }
+
+    4950 {
+      # A WHOLE PROFILE being turned off: SettingType EnableFirewall with value
+      # 'No' (some builds write 'Enable Windows Firewall', the oldest write '0').
+      # Every other 4950 setting change is informational and stays out - the
+      # individual rule adds/changes are firewall_rule_modified's job.
+      $type = "$($f.settingType)"
+      $value = "$($f.settingValue)"
+      $isEnableFirewall = ($type -eq 'EnableFirewall') -or ($type -eq 'Enable Windows Firewall')
+      $isOff = ($value -eq 'No') -or ($value -eq '0') -or ($value -eq 'False')
+      if ($isEnableFirewall -and $isOff) {
+        if (-not (Should-Dedupe 'firewall_disabled' "$($f.profileChanged)")) {
+          return New-Alert 'firewall_disabled' "The Windows Firewall '$($f.profileChanged)' profile was turned OFF on $($f.hostname) by `"$($f.subjectUserName)`" - the host is open for lateral movement." $null $f (Get-DedupeKey 'firewall_disabled' "$($f.profileChanged)") $evtTime
+        }
       }
     }
 
@@ -4852,6 +4917,8 @@ function New-SelfTestProbes {
   $probes += @{ ruleKey = 'defender_disabled'; id = 5001; fields = @{ ProductName = 'Windows Defender' } }
 
   $probes += @{ ruleKey = 'firewall_rule_modified'; id = 4946; fields = @{ SubjectUserName = 'administrator'; RuleName = 'Allow RDP inbound' } }
+  $probes += @{ ruleKey = 'firewall_disabled'; id = 4950; fields = @{ SubjectUserName = 'administrator'; ProfileChanged = 'Domain'; SettingType = 'EnableFirewall'; SettingValue = 'No' } }
+  $probes += @{ ruleKey = 'anonymous_smb_session'; id = 4624; fields = @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '127.0.0.99' } }
   $probes += @{ ruleKey = 'system_time_changed'; id = 4616; fields = @{ SubjectUserName = 'administrator'; NewTime = '2026-01-01T00:00:00.000Z' } }
   $probes += @{ ruleKey = 'special_privileges_assigned'; id = 4672; fields = @{ SubjectUserName = 'administrator'; PrivilegeList = 'SeSecurityPrivilege SeShutdownPrivilege SeChangeNotifyPrivilege' } }
 
@@ -4935,7 +5002,7 @@ $LogSources = @(
   @{ Log = 'Security'; Ids = @(
       4624, 4625, 4648, 4657, 4662, 4672, 4697, 4698, 4719, 4720, 4722, 4724,
       4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4756, 4768, 4769, 4771,
-      4776, 4946, 4947, 4948, 4949, 5141, 1100, 1102, 4616
+      4776, 4946, 4947, 4948, 4949, 4950, 5141, 1100, 1102, 4616
     )
   }
   @{ Log = 'System'; Ids = @(7045) }
