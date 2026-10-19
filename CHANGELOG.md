@@ -1,4 +1,30 @@
-﻿# Changelog
+# Changelog
+
+## v2.6.0 - Modern Cyber Defense Platform & Attack Paths Release
+
+Complete modernization of Alpha Sentinel for enterprise-grade SOC analysis, startup presentations, and graduation project distinction.
+
+### 1. Interactive Active Directory Attack Paths (`#/paths`)
+- BloodHound-style identity compromise graph modeling lateral movement paths targeting Tier-0 Domain Controllers and Domain Admins.
+- Interactive SVG graph with node classification (Tier-0 Domain Controllers & Domain Admins, Tier-1 Servers & Service Accounts, Tier-2 Workstations & Users).
+- Direct correlation with live alerts: compromised entities and hops illuminate with glowing telemetry indicators.
+- Interactive Attack Path Inspector displaying blast radius, ACL relationships, hops to Domain Admin, and containment recommendations.
+- Backend API endpoint (`GET /api/paths`) serving graph topology and compromise indicators.
+
+### 2. Interactive MITRE ATT&CK Matrix & Heatmap Grid
+- Added full 11-stage MITRE ATT&CK Enterprise Matrix to the Security Overview page (`js/pages/overview.js`).
+- Visualizes real-time detection telemetry across Initial Access, Execution, Persistence, Privilege Escalation, Defense Evasion, Credential Access, Discovery, Lateral Movement, and Impact.
+- Tactic columns dynamically light up with active alert badges and direct navigation to filtered alert feeds.
+
+### 3. Automated SOC Incident Response & Playbooks
+- Integrated Incident Response Playbooks directly into the alert inspection drawer (`js/pages/alerts.js`).
+- Pre-populated, one-click copyable PowerShell containment scripts tailored to each detection family (e.g. `Disable-ADAccount`, `Set-ADAccountControl`, `Set-NetFirewallProfile`, `Reset-ComputerMachinePassword`, `Remove-ADGroupMember`).
+- Provides immediate triage and containment steps for incident responders.
+
+### 4. Modern Cyber Defense Glassmorphism Design System
+- Modern dark cyber aesthetic with glassmorphic translucent surfaces (`backdrop-filter: blur`), glowing telemetry rings, and refined depth shadows (`css/tokens.css`, `css/base.css`, `css/layout.css`, `css/components.css`, `css/pages.css`, `css/login.css`).
+- Live telemetry radar pulse indicators for healthy, degraded, and breach states.
+- High-tech sign-in portal with glowing shield emblem and modern security styling.
 
 ## v2.5.1
 
