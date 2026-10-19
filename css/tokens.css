@@ -3,41 +3,50 @@
    Crimson is the BRAND colour (logo, active nav, primary button). Severity
    colours are deliberately separate and never crimson. */
 :root {
-  /* surfaces */
-  --bg-0: #0d0b10;
-  --bg-1: #15131a;
-  --bg-2: #1c1923;
-  --bg-3: #241f2e;
-  --line: #2a2533;
-  --line-2: #3a3445;
+  /* surfaces - modern deep dark palette with layered glassmorphism */
+  --bg-0: #0a090e;
+  --bg-1: #121018;
+  --bg-2: #191622;
+  --bg-3: #221d2e;
+  --line: #272233;
+  --line-2: #383147;
+  --surface-glass: rgba(18, 16, 24, 0.78);
+  --surface-card: rgba(22, 19, 31, 0.85);
+  --surface-hover: rgba(36, 31, 48, 0.6);
 
   /* text (all >= 4.5:1 on --bg-0 / --bg-1) */
-  --text: #ece9f1;
-  --text-dim: #a9a2b4;
-  --text-mute: #837c95;
+  --text: #f0edf6;
+  --text-dim: #ada7b8;
+  --text-mute: #7f7891;
 
   /* brand - crimson, BRAND ONLY */
   --brand: #d2103c;
   --brand-dim: #8e0b28;
-  --brand-soft: rgba(210, 16, 60, 0.14);
+  --brand-soft: rgba(210, 16, 60, 0.16);
+  --brand-glow: rgba(210, 16, 60, 0.35);
 
   /* severity - never crimson */
   --sev-critical: #ff4d6d;
+  --sev-critical-soft: rgba(255, 77, 109, 0.16);
   --sev-high: #ff8a3d;
+  --sev-high-soft: rgba(255, 138, 61, 0.16);
   --sev-medium: #ffc247;
+  --sev-medium-soft: rgba(255, 194, 71, 0.16);
   --sev-low: #8fa3bd;
+  --sev-low-soft: rgba(143, 163, 189, 0.16);
 
   /* state */
   --ok: #2ec4a6;
-  --ok-soft: rgba(46, 196, 166, 0.14);
+  --ok-soft: rgba(46, 196, 166, 0.15);
+  --ok-glow: rgba(46, 196, 166, 0.4);
   --warn: #ffb020;
-  --warn-soft: rgba(255, 176, 32, 0.14);
+  --warn-soft: rgba(255, 176, 32, 0.15);
   --bad: #ff4d6d;
-  --bad-soft: rgba(255, 77, 109, 0.14);
+  --bad-soft: rgba(255, 77, 109, 0.15);
 
   /* type */
-  --font: "Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  --font: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", "Fira Code", Consolas, monospace;
   --fs-base: 15px;
   --fs-table: 14px;
   --fs-tile: 30px;
@@ -49,14 +58,15 @@
   /* space */
   --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
   --s-5: 22px; --s-6: 30px;
-  --radius: 8px;
-  --radius-sm: 5px;
+  --radius: 10px;
+  --radius-sm: 6px;
   --radius-pill: 999px;
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(255, 255, 255, 0.04) inset;
+  --shadow-glow: 0 0 24px var(--brand-glow);
 
   /* layout */
   --sidebar-w: 224px;
   --sidebar-w-collapsed: 62px;
   --topbar-h: 58px;
-  --drawer-w: 470px;
+  --drawer-w: 520px;
 }
