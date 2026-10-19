@@ -200,6 +200,60 @@
     return card;
   }
 
+  function mitreMatrixCard(ov, alerts) {
+    var counts = ov.tacticCounts || {};
+    var allTactics = [
+      { name: 'Initial Access', id: 'TA0001', rules: ['anonymous_smb_session', 'suspicious_remote_logon'] },
+      { name: 'Execution', id: 'TA0002', rules: ['service_abuse', 'scheduled_task_created'] },
+      { name: 'Persistence', id: 'TA0003', rules: ['account_created', 'registry_persistence', 'service_abuse', 'scheduled_task_created'] },
+      { name: 'Privilege Escalation', id: 'TA0004', rules: ['privilege_escalation', 'special_privileges_assigned'] },
+      { name: 'Defense Evasion', id: 'TA0005', rules: ['log_tampering', 'audit_policy_changed', 'eventlog_service_stopped', 'defender_disabled', 'firewall_disabled', 'account_control_changed', 'system_time_changed'] },
+      { name: 'Credential Access', id: 'TA0006', rules: ['password_spraying', 'brute_force_single_account', 'kerberos_preauth_spraying', 'ntlm_failed_auth', 'account_lockout_storm', 'kerberoasting', 'asrep_roasting', 'dcsync_replication'] },
+      { name: 'Discovery', id: 'TA0007', rules: ['ldap_recon', 'anonymous_smb_session'] },
+      { name: 'Lateral Movement', id: 'TA0008', rules: ['suspicious_remote_logon', 'explicit_credential_logon'] },
+      { name: 'Impact', id: 'TA0040', rules: ['account_deleted', 'group_membership_removed'] }
+    ];
+
+    var cols = allTactics.map(function (t) {
+      var n = Number(counts[t.name]) || 0;
+      var activeAlerts = (alerts || []).filter(function (a) { return a.Tactic === t.name; });
+      var colCls = 'mitre-col' + (n > 0 ? ' lit' : '');
+
+      var head = S.ui.el('div', { class: 'mitre-col-head' }, [
+        S.ui.el('span', { text: t.name }),
+        S.ui.el('span', { class: 'm-badge', text: String(n) })
+      ]);
+
+      var list = S.ui.el('ul', { class: 'mitre-tech-list' });
+      t.rules.forEach(function (rk) {
+        var isFired = activeAlerts.some(function (a) { return a.RuleKey === rk; });
+        var friendly = rk.replace(/_/g, ' ');
+        var item = S.ui.el('li', { class: 'mitre-tech' + (isFired ? ' active' : ''), title: friendly }, [
+          S.ui.el('span', { text: friendly }),
+          isFired ? S.ui.el('span', { class: 'tech-count', text: '!' }) : null
+        ]);
+        if (isFired) {
+          item.style.cursor = 'pointer';
+          item.addEventListener('click', function () { window.location.hash = '#/alerts'; });
+        }
+        list.appendChild(item);
+      });
+
+      return S.ui.el('div', { class: colCls }, [head, list]);
+    });
+
+    return S.ui.el('div', { class: 'card' }, [
+      S.ui.el('div', { class: 'card-head' }, [
+        S.ui.el('h2', { text: 'MITRE ATT&CK Enterprise Matrix' }),
+        S.ui.el('span', { class: 'grow spacer' }),
+        S.ui.el('span', { class: 'caption', text: 'Real-time telemetry mapped across the Active Directory kill-chain' })
+      ]),
+      S.ui.el('div', { class: 'card-body' }, [
+        S.ui.el('div', { class: 'mitre-matrix' }, cols)
+      ])
+    ]);
+  }
+
   function eventsCard(events) {
     var tbody = S.ui.el('tbody');
     events.slice(0, 6).forEach(function (e) {
@@ -233,6 +287,7 @@
     var right = S.ui.el('div', { style: 'display:flex;flex-direction:column;gap:12px' }, [coverageCard(ov), hourlyCard(ov), tacticsCard(ov)]);
     view.appendChild(tiles);
     view.appendChild(S.ui.el('div', { class: 'grid-2' }, [left, right]));
+    view.appendChild(mitreMatrixCard(ov, alerts || []));
     view.appendChild(severityCard(ov));
     view.appendChild(eventsCard(events || []));
   }
