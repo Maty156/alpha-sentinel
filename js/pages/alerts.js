@@ -154,9 +154,90 @@
       ]);
     }));
 
+    function buildPlaybook(a) {
+      var rk = String(a.RuleKey || '').toLowerCase();
+      var acc = a.Account && a.Account !== '-' ? a.Account : '$TargetAccount';
+      var host = a.Host && a.Host !== '-' ? a.Host : '$TargetHost';
+      var ip = a.SourceIp && a.SourceIp !== '-' ? a.SourceIp : '$AttackerIP';
+
+      var steps = [];
+      if (rk.indexOf('dcsync') >= 0) {
+        steps.push({
+          title: '1. Immediate Account Isolation',
+          cmd: 'Disable-ADAccount -Identity "' + acc + '" -Confirm:$false\nRevoke-AzureADUserAllRefreshToken -ObjectId "' + acc + '"'
+        });
+        steps.push({
+          title: '2. Emergency KRBTGT Ticket Rotation',
+          cmd: '# Double-rotation required to invalidate current & parent tickets\nReset-ComputerMachinePassword\nClear-DnsClientCache'
+        });
+      } else if (rk.indexOf('kerberoast') >= 0) {
+        steps.push({
+          title: '1. Enforce AES-256 Kerberos Encryption',
+          cmd: 'Set-ADUser -Identity "' + acc + '" -KerberosEncryptionType AES128,AES256'
+        });
+        steps.push({
+          title: '2. Force Password Reset & Invalidate Sessions',
+          cmd: 'Set-ADAccountPassword -Identity "' + acc + '" -Reset\nklist purge'
+        });
+      } else if (rk.indexOf('asrep') >= 0) {
+        steps.push({
+          title: '1. Re-enable Kerberos Pre-Authentication',
+          cmd: 'Set-ADAccountControl -Identity "' + acc + '" -DoesNotRequirePreAuth $false'
+        });
+      } else if (rk.indexOf('firewall') >= 0) {
+        steps.push({
+          title: '1. Restore Windows Firewall Enforcement',
+          cmd: 'Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True'
+        });
+      } else if (rk.indexOf('spray') >= 0 || rk.indexOf('brute') >= 0) {
+        steps.push({
+          title: '1. Perimeter / Host Inbound IP Block',
+          cmd: 'New-NetFirewallRule -DisplayName "Sentinel-Block-' + ip + '" -Direction Inbound -Action Block -RemoteAddress "' + ip + '"'
+        });
+      } else if (rk.indexOf('privilege') >= 0) {
+        steps.push({
+          title: '1. Remove Unauthorized Privileged Membership',
+          cmd: 'Remove-ADGroupMember -Identity "Domain Admins" -Members "' + acc + '" -Confirm:$false'
+        });
+      } else {
+        steps.push({
+          title: '1. Investigate and Isolate Session',
+          cmd: 'Get-NetTCPConnection -RemoteAddress "' + ip + '" | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess'
+        });
+      }
+
+      var wrap = S.ui.el('div', { class: 'playbook-card' }, [
+        S.ui.el('div', { class: 'playbook-title' }, [
+          S.ui.el('span', { text: 'Automated Response Playbook' }),
+          S.ui.el('span', { class: 'badge', text: 'PowerShell Ready' })
+        ])
+      ]);
+
+      steps.forEach(function (st) {
+        var copyBtn = S.ui.el('button', { class: 'cmd-copy-btn', type: 'button', text: 'Copy' });
+        copyBtn.addEventListener('click', function () {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(st.cmd).then(function () {
+              S.ui.toast('Copied playbook command to clipboard', 'ok');
+            });
+          }
+        });
+        var cmdEl = S.ui.el('pre', { class: 'cmd-box', text: st.cmd });
+        cmdEl.appendChild(copyBtn);
+
+        wrap.appendChild(S.ui.el('div', { class: 'playbook-step' }, [
+          S.ui.el('div', { class: 'playbook-step-title', text: st.title }),
+          cmdEl
+        ]));
+      });
+
+      return wrap;
+    }
+
     var body = S.ui.el('div', { class: 'drawer-body' }, [
       S.ui.el('div', { class: 'row' }, [S.ui.el('span', { class: 'caption', text: 'Status' }), statusSel, ackBtn]),
       kv,
+      S.ui.el('div', {}, [S.ui.el('h2', { text: 'Incident Response Actions' }), buildPlaybook(a)]),
       S.ui.el('div', {}, [S.ui.el('h2', { text: 'Contributing events' }), contributions.length ? contribList : S.ui.empty('No event detail', 'This row has no recorded contributing event.')]),
       S.ui.el('div', {}, [S.ui.el('h2', { text: 'Kill-chain timeline' }), killChain.length ? chainList : S.ui.empty('Nothing else for this host or account', 'Related alerts appear here ordered by time.')])
     ]);
