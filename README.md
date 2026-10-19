@@ -304,7 +304,7 @@ Eight pages, one file each (see `js/pages/`):
   forwarding on/off and destination host, the audit preflight and the account names
   with creation dates. No secret is ever rendered.
 
-**Attack Paths** is the one remaining disabled "Soon" item: no route, no page.
+- **Attack Paths** - interactive Active Directory identity graph (`#/paths`). Maps the shortest lateral movement and privilege escalation attack vectors from low-privileged standard user accounts (Tier 2) through servers and service accounts (Tier 1) to Domain Admins and Domain Controllers (Tier 0). Correlates directly with live detections, highlighting compromised hops and calculating blast radius.
 
 Settings has four tabs: **General** is the read-only configuration view; **Account**
 changes your own password (>= 12 characters, the current one re-verified, every other
