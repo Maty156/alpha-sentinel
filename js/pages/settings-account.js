@@ -123,8 +123,24 @@
     var chosen = (session && session.avatarColor) || 'crimson';
     var currentInitials = (session && session.avatarInitials) || '';
     var form = S.ui.el('form', { class: 'card-form', novalidate: 'novalidate' });
+    
+    // Live avatar preview circle
+    var chosenHex = (PALETTE.filter(function (x) { return x.key === chosen; })[0] || PALETTE[0]).hex;
+    var preview = S.ui.el('div', { class: 'avatar-preview-lg', text: currentInitials ? currentInitials.toUpperCase() : '?' });
+    preview.style.backgroundColor = chosenHex;
+    var previewText = S.ui.el('div', {}, [
+      S.ui.el('div', { style: 'font-weight:600;font-size:14px;color:var(--text)', text: 'Topbar Badge Preview' }),
+      S.ui.el('div', { class: 'caption', text: 'Rendered in the console header menu' })
+    ]);
+    var previewBox = S.ui.el('div', { class: 'avatar-preview-box' }, [preview, previewText]);
+
     var input = S.ui.el('input', { class: 'field', type: 'text', id: 'accInitials', value: currentInitials, maxlength: '2', autocomplete: 'off' });
+    input.addEventListener('input', function () {
+      var txt = input.value.trim().toUpperCase();
+      preview.textContent = txt || '?';
+    });
     var rowInit = field('Initials', input, '1-2 characters, A-Z or 0-9.');
+    
     var swatches = S.ui.el('div', { class: 'swatch-row', role: 'radiogroup', 'aria-label': 'Avatar colour' });
     PALETTE.forEach(function (c) {
       var b = S.ui.el('button', {
@@ -134,6 +150,7 @@
       b.style.backgroundColor = c.hex;
       b.addEventListener('click', function () {
         chosen = c.key;
+        preview.style.backgroundColor = c.hex;
         Array.prototype.forEach.call(swatches.children, function (x) { x.classList.remove('on'); });
         b.classList.add('on');
       });
@@ -141,8 +158,10 @@
     });
     var msg = S.ui.el('div', { class: 'form-msg', 'aria-live': 'polite' });
     var submit = S.ui.el('button', { class: 'btn btn-primary', type: 'submit', text: 'Save avatar' });
+    
+    form.appendChild(previewBox);
     form.appendChild(rowInit);
-    form.appendChild(S.ui.el('div', { class: 'form-row' }, [S.ui.el('div', { class: 'form-label', text: 'Colour' }), swatches]));
+    form.appendChild(S.ui.el('div', { class: 'form-row' }, [S.ui.el('div', { class: 'form-label', text: 'Accent Colour' }), swatches]));
     form.appendChild(msg);
     form.appendChild(S.ui.el('div', { class: 'form-actions' }, [submit]));
     form.addEventListener('submit', function (ev) {
@@ -162,8 +181,23 @@
       }).then(function () { submit.disabled = false; });
     });
     view.appendChild(S.ui.el('div', { class: 'card' }, [
-      S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Avatar' })]),
+      S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Avatar & Identity' })]),
       S.ui.el('div', { class: 'card-body' }, [form])
+    ]));
+  }
+
+  function securityCard(view, session) {
+    var user = (session && session.user) || 'admin';
+    var kv = S.ui.el('dl', { class: 'kv' }, [
+      S.ui.el('dt', { text: 'Signed In User' }), S.ui.el('dd', { class: 'cell-strong', text: user }),
+      S.ui.el('dt', { text: 'Authentication' }), S.ui.el('dd', { text: 'PBKDF2 (150,000 iterations, SHA-1)' }),
+      S.ui.el('dt', { text: 'Session Lifetime' }), S.ui.el('dd', { text: '8 hours (30 min idle timeout)' }),
+      S.ui.el('dt', { text: 'Cookie Protection' }), S.ui.el('dd', { text: 'HttpOnly; SameSite=Strict' }),
+      S.ui.el('dt', { text: 'Brute-Force Guard' }), S.ui.el('dd', { text: '5 attempts / 5 mins (HTTP 429 block)' })
+    ]);
+    view.appendChild(S.ui.el('div', { class: 'card' }, [
+      S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Session Security Posture' })]),
+      S.ui.el('div', { class: 'card-body' }, [kv])
     ]));
   }
 
@@ -171,9 +205,16 @@
     render: function (view) {
       S.ui.clear(view);
       S.api.get('/api/session', 'settings-account').then(function (session) {
-        general(view, session);
-        usernameCard(view, session);
-        avatarCard(view, session);
+        var grid = S.ui.el('div', { class: 'settings-layout' });
+        var left = S.ui.el('div', { style: 'display:flex;flex-direction:column;gap:var(--s-4)' });
+        var right = S.ui.el('div', { style: 'display:flex;flex-direction:column;gap:var(--s-4)' });
+        general(left, session);
+        usernameCard(left, session);
+        avatarCard(right, session);
+        securityCard(right, session);
+        grid.appendChild(left);
+        grid.appendChild(right);
+        view.appendChild(grid);
       }).catch(function (err) {
         view.appendChild(S.ui.error(err && err.message ? err.message : 'Could not load the account.'));
       });
