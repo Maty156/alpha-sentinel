@@ -29,18 +29,40 @@ img, svg { max-width: 100%; }
   outline: 2px solid var(--brand);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
+  box-shadow: 0 0 8px var(--brand-glow);
 }
 
 /* thin dark scrollbars */
 * { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
-*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: var(--radius-pill); }
-*::-webkit-scrollbar-thumb:hover { background: #4a4358; }
+*::-webkit-scrollbar-thumb:hover { background: #4e4460; }
+
+/* cyber animations & live radar telemetry pulses */
+@keyframes pulse-radar {
+  0% { transform: scale(0.95); opacity: 0.8; box-shadow: 0 0 0 0 var(--ok-glow); }
+  70% { transform: scale(1.05); opacity: 1; box-shadow: 0 0 0 6px rgba(46, 196, 166, 0); }
+  100% { transform: scale(0.95); opacity: 0.8; box-shadow: 0 0 0 0 rgba(46, 196, 166, 0); }
+}
+
+@keyframes pulse-critical {
+  0% { transform: scale(0.95); opacity: 0.8; box-shadow: 0 0 0 0 var(--brand-glow); }
+  70% { transform: scale(1.05); opacity: 1; box-shadow: 0 0 0 7px rgba(210, 16, 60, 0); }
+  100% { transform: scale(0.95); opacity: 0.8; box-shadow: 0 0 0 0 rgba(210, 16, 60, 0); }
+}
+
+.pulse-live {
+  animation: pulse-radar 2.4s infinite ease-in-out;
+}
+
+.pulse-alert {
+  animation: pulse-critical 1.8s infinite ease-in-out;
+}
 
 /* empty and error states, used by every page */
 .state { padding: var(--s-6) var(--s-4); text-align: center; color: var(--text-mute); }
-.state .state-title { color: var(--text-dim); font-size: var(--fs-base); margin-bottom: var(--s-1); }
+.state .state-title { color: var(--text-dim); font-size: var(--fs-base); margin-bottom: var(--s-1); font-weight: 500; }
 .state .state-hint { font-size: var(--fs-cap); }
 .state-error .state-title { color: var(--bad); }
 [hidden] { display: none !important; }
