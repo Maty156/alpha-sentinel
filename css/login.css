@@ -1,19 +1,37 @@
 /* login.css - OWNER: the sign-in page only. Uses the same tokens as the app. */
-.login-wrap { min-height: 100vh; display: grid; place-items: center; padding: var(--s-5); }
+.login-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--s-5);
+  background: radial-gradient(circle at 50% 30%, rgba(210, 16, 60, 0.08) 0%, rgba(10, 9, 14, 0.98) 70%);
+}
 .login-card {
-  width: 100%; max-width: 380px; background: var(--bg-1); border: 1px solid var(--line);
-  border-radius: var(--radius); padding: var(--s-6) var(--s-5); box-shadow: var(--shadow);
+  width: 100%;
+  max-width: 400px;
+  background: var(--surface-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: var(--s-6) var(--s-5);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
 }
 .login-card .brand { justify-content: center; padding-bottom: var(--s-2); }
-.login-sub { color: var(--text-mute); font-size: var(--fs-cap); text-align: center; margin-bottom: var(--s-5); }
+.login-card .brand-mark { width: 32px; height: 32px; filter: drop-shadow(0 0 8px var(--brand-glow)); }
+.login-card .brand-name { font-size: 17px; letter-spacing: 1.5px; }
+.login-sub { color: var(--text-mute); font-size: var(--fs-cap); text-align: center; margin-bottom: var(--s-5); font-weight: 500; }
 .login-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--s-3); }
-.login-field label { font-size: var(--fs-cap); color: var(--text-dim); }
-.login-field input { width: 100%; }
+.login-field label { font-size: var(--fs-cap); color: var(--text-dim); font-weight: 500; }
+.login-field input { width: 100%; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.login-field input:focus { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-soft); }
 .login-actions { margin-top: var(--s-4); }
-.login-actions .btn-primary { width: 100%; justify-content: center; padding: 9px; }
+.login-actions .btn-primary { width: 100%; justify-content: center; padding: 10px; font-weight: 600; font-size: 14px; box-shadow: 0 4px 14px var(--brand-soft); transition: all 0.15s ease; }
+.login-actions .btn-primary:hover { box-shadow: 0 6px 18px var(--brand-glow); }
 .login-error {
   display: none; margin-bottom: var(--s-3); padding: 9px var(--s-3); border-radius: var(--radius-sm);
-  background: var(--bad-soft); color: var(--bad); font-size: var(--fs-table);
+  background: var(--bad-soft); color: var(--bad); font-size: var(--fs-table); border: 1px solid var(--bad);
 }
 .login-error.on { display: block; }
 .login-foot { margin-top: var(--s-4); text-align: center; color: var(--text-mute); font-size: var(--fs-cap); }
+
