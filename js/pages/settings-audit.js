@@ -58,11 +58,35 @@
     });
   }
 
+  function statPill(count, label, kind, icon) {
+    return S.ui.el('div', { class: 'audit-stat-pill' }, [
+      S.ui.el('div', { class: 'audit-stat-num audit-stat-' + kind, text: String(count) }),
+      S.ui.el('div', { class: 'audit-stat-label', text: label })
+    ]);
+  }
+
   function paint(data) {
     var view = document.getElementById('settingsBody');
     if (!view) { return; }
     S.ui.clear(view);
     var elevated = !!(data && data.elevated);
+    var rules = data.rules || [];
+
+    /* ---- top HUD: stat pills ---- */
+    var okCount     = rules.filter(function (r) { return r.state === 'ok'; }).length;
+    var blindCount  = rules.filter(function (r) { return r.state === 'blind'; }).length;
+    var unverCount  = rules.filter(function (r) { return r.state !== 'ok' && r.state !== 'blind'; }).length;
+
+    view.appendChild(S.ui.el('div', { class: 'audit-hud' }, [
+      statPill(okCount,    'Verified',   'ok'),
+      statPill(blindCount, 'Blind',      'bad'),
+      statPill(unverCount, 'Unverified', 'warn'),
+      S.ui.el('div', { class: 'audit-hud-right' }, [
+        elevated
+          ? S.ui.el('span', { class: 'pill pill-ok', title: 'Can modify the audit policy' }, [S.ui.el('span', { class: 'dot' }), S.ui.el('span', { text: 'Elevated' })])
+          : S.ui.el('span', { class: 'pill pill-warn', title: 'Read-only view — run as Administrator to change policy' }, [S.ui.el('span', { class: 'dot' }), S.ui.el('span', { text: 'Read-only' })])
+      ])
+    ]));
 
     if (!elevated) {
       view.appendChild(S.ui.el('div', { class: 'banner banner-info' }, [
@@ -71,7 +95,7 @@
     }
 
     var tbody = S.ui.el('tbody');
-    (data.rules || []).forEach(function (r) {
+    rules.forEach(function (r) {
       tbody.appendChild(S.ui.el('tr', {}, [
         S.ui.el('td', { class: 'cell-strong', text: r.key }),
         S.ui.el('td', { text: r.subcategory || '-' }),
@@ -83,7 +107,7 @@
       S.ui.el('div', { class: 'card-head' }, [
         S.ui.el('h2', { text: 'Rule families and the audit policy' }),
         S.ui.el('span', { class: 'grow spacer' }),
-        S.ui.el('span', { class: 'caption', text: (data.rules || []).length + ' families' })
+        S.ui.el('span', { class: 'caption', text: rules.length + ' families' })
       ]),
       S.ui.el('div', { class: 'card-body' }, [
         S.ui.el('div', { class: 'table-wrap' }, [
@@ -95,19 +119,44 @@
       ])
     ]));
 
-    var actions = S.ui.el('div', { class: 'card' }, [
-      S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Set the policy Sentinel needs' })])
-    ]);
-    var body = S.ui.el('div', { class: 'card-body' });
+    /* ---- action card ---- */
     var previewBtn = S.ui.el('button', { class: 'btn', type: 'button', text: 'Preview changes' });
-    var applyBtn = S.ui.el('button', { class: 'btn btn-primary', type: 'button', text: 'Apply' });
+    var applyBtn   = S.ui.el('button', { class: 'btn btn-primary', type: 'button', text: 'Apply policy' });
     var restoreBtn = S.ui.el('button', { class: 'btn', type: 'button', text: 'Restore a backup' });
-    if (!elevated) { applyBtn.disabled = true; restoreBtn.disabled = true; applyBtn.title = 'Run Sentinel as Administrator to change the audit policy'; restoreBtn.title = applyBtn.title; }
+    if (!elevated) {
+      applyBtn.disabled  = true;
+      restoreBtn.disabled = true;
+      applyBtn.title  = 'Run Sentinel as Administrator to change the audit policy';
+      restoreBtn.title = applyBtn.title;
+    }
     var previewBox = S.ui.el('div', { class: 'audit-preview', 'aria-live': 'polite' });
-    body.appendChild(S.ui.el('div', { class: 'form-actions' }, [previewBtn, applyBtn, restoreBtn]));
-    body.appendChild(previewBox);
-    actions.appendChild(body);
-    view.appendChild(actions);
+
+    var actionsBody = S.ui.el('div', { class: 'card-body' }, [
+      S.ui.el('div', { class: 'audit-action-grid' }, [
+        S.ui.el('div', { class: 'audit-action-item' }, [
+          S.ui.el('div', { class: 'audit-action-title', text: 'Preview' }),
+          S.ui.el('div', { class: 'audit-action-desc', text: 'Show what subcategories would be changed without applying anything.' }),
+          previewBtn
+        ]),
+        S.ui.el('div', { class: 'audit-action-item audit-action-item-primary' }, [
+          S.ui.el('div', { class: 'audit-action-title', text: 'Apply policy' }),
+          S.ui.el('div', { class: 'audit-action-desc', text: 'Enable the subcategories Sentinel needs. A backup is written first.' }),
+          applyBtn
+        ]),
+        S.ui.el('div', { class: 'audit-action-item' }, [
+          S.ui.el('div', { class: 'audit-action-title', text: 'Restore backup' }),
+          S.ui.el('div', { class: 'audit-action-desc', text: 'Roll back to a policy snapshot written by Sentinel.' }),
+          restoreBtn
+        ])
+      ]),
+      previewBox
+    ]);
+
+    view.appendChild(S.ui.el('div', { class: 'card' }, [
+      S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Set the policy Sentinel needs' })]),
+      actionsBody
+    ]));
+
 
     function renderPreview(changes) {
       S.ui.clear(previewBox);
