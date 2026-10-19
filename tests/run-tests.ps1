@@ -1,4 +1,4 @@
-﻿<#
+<#
 tests/run-tests.ps1 - AlphaSentinel test suite.
 
 Runs offline - no Windows event log, no HTTP, no network - by splitting the tool
@@ -1543,12 +1543,9 @@ try {
 
   # --- mockup vs spec -------------------------------------------------------
   $dash = Get-RepoText 'dashboard.html'
-  # Attack Paths (a BloodHound-style graph) is the one greyed "Soon" item that
-  # stays greyed.  Assets, Attack Chains and Reports become live pages in their
-  # own parts, and each of those parts asserts its own nav link and route - so
-  # this block only asserts what is true of every part.
-  Assert-True ($dash.Contains('Attack Paths')) 'Attack Paths is still shown (disabled)'
-  Assert-True (-not ($dash -match 'href="#/paths"')) 'Attack Paths has no route'
+  # Attack Paths (a BloodHound-style graph) is a full live page with graph analysis
+  Assert-True ($dash.Contains('Attack Paths')) 'Attack Paths is rendered in the nav'
+  Assert-True ($dash -match 'href="#/paths"') 'Attack Paths has a route'
   Assert-True ($dash.Contains('id="search"')) 'the top search box is rendered'
   Assert-True ($dash.Contains('id="range"')) 'the range selector is rendered'
   Assert-True ([regex]::Matches($dash, '<option').Count -eq 1) 'and is fixed at one option (24 h) - no new endpoint behind it'
@@ -1951,9 +1948,9 @@ try {
   # the Reports page is real from this part on - and it is the last one, so the
   # nav is back down to a single greyed item
   $dashR = Get-RepoText 'dashboard.html'
-  Assert-True ($dashR -match '<a class="nav-item" href="#/reports" data-page="reports">') 'Reports is a live nav link'
-  Assert-True ([regex]::Matches($dashR, 'nav-item disabled').Count -eq 1) 'only Attack Paths renders as a disabled nav item'
-  Assert-True ([regex]::Matches($dashR, 'nav-soon').Count -eq 1) 'and it is the only Soon marker'
+  Assert-True ($dashR -match '<a class="nav-item" href="#/paths" data-page="paths">') 'Attack Paths is a live nav link'
+  Assert-True ((Get-RepoText 'js/router.js').Contains("'/paths': 'paths'")) '#/paths is routed'
+  Assert-True ($dashR.Contains('/js/pages/paths.js')) 'and the paths page module is loaded by the shell'
   Assert-True ((Get-RepoText 'js/router.js').Contains("'/reports': 'reports'")) '#/reports is routed'
   Assert-True ($dashR.Contains('/js/pages/reports.js')) 'and the page module is loaded by the shell'
 
