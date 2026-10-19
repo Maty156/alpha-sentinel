@@ -1,4 +1,4 @@
-﻿# ============================================================================
+# ============================================================================
 # ALPHA SENTINEL v2.5.0 - AD / Network Attack Monitor (background service + web UI)
 # ============================================================================
 # A standalone Windows security monitor from the ALPHA Cybersecurity project.
@@ -541,7 +541,7 @@ $Script:RecentAlertTimes = @{}    # dedupeKey -> last fired (dedupe window)
 $Script:DedupeAlertId = @{}       # dedupeKey -> Id of the open alert it created
 $Script:Alerts = New-Object System.Collections.Generic.List[object]
 $Script:NextAlertId = 1
-$Script:SeenRecords = @{}         # EventRecordID -> seen, so a re-polled event is evaluated once
+$Script:SeenRecords = @{}         # "channel|EventRecordID" -> seen, so a re-polled event is evaluated once (record ids are unique per channel, not globally)
 $Script:AlertsDirty = $true       # /api/alerts caches its JSON until an alert changes
 $Script:AlertsJson = '[]'
 $Script:ForwardFailures = 0
@@ -1827,7 +1827,43 @@ function Get-AttackChains {
   return $chains
 }
 
+function Get-AttackPathsPayload {
+  $openAlerts = @($Script:Alerts | Where-Object { -not $_.SelfTest -and "$($_.Status)" -ne 'Resolved' -and "$($_.Status)" -ne 'False Positive' })
+  $compromisedAccounts = @{}
+  $compromisedHosts = @{}
+  foreach ($a in $openAlerts) {
+    if ($a.Account -and "$($a.Account)" -ne '-') { $compromisedAccounts["$($a.Account)".ToLower()] = $true }
+    if ($a.Host -and "$($a.Host)" -ne '-') { $compromisedHosts["$($a.Host)".ToLower()] = $true }
+  }
 
+  $nodes = @(
+    [PSCustomObject]@{ id = 'u1'; name = 'jsmith'; type = 'user'; tier = 2; label = 'Standard User (Sales)'; compromised = [bool]$compromisedAccounts.ContainsKey('jsmith') },
+    [PSCustomObject]@{ id = 'h1'; name = 'WS-SALES-04'; type = 'host'; tier = 2; label = 'Workstation (Windows 11)'; compromised = [bool]$compromisedHosts.ContainsKey('ws-sales-04') },
+    [PSCustomObject]@{ id = 'u2'; name = 'svc-backup'; type = 'service'; tier = 1; label = 'Service Account (Veeam)'; compromised = [bool]($compromisedAccounts.ContainsKey('svc-backup') -or $compromisedAccounts.ContainsKey('kerberoasting')) },
+    [PSCustomObject]@{ id = 'h2'; name = 'SRV-FILE-01'; type = 'server'; tier = 1; label = 'Member File Server'; compromised = [bool]$compromisedHosts.ContainsKey('srv-file-01') },
+    [PSCustomObject]@{ id = 'g1'; name = 'Server Operators'; type = 'group'; tier = 1; label = 'AD Security Group'; compromised = $false },
+    [PSCustomObject]@{ id = 'u3'; name = 'adm-da'; type = 'admin'; tier = 0; label = 'Delegated Administrator'; compromised = [bool]$compromisedAccounts.ContainsKey('adm-da') },
+    [PSCustomObject]@{ id = 'g0'; name = 'Domain Admins'; type = 'group'; tier = 0; label = 'Tier-0 Privileged Group'; compromised = [bool]$compromisedAccounts.ContainsKey('privilege_escalation') },
+    [PSCustomObject]@{ id = 'dc'; name = 'DC01.corp.local'; type = 'dc'; tier = 0; label = 'Primary Domain Controller'; compromised = [bool]($compromisedHosts.ContainsKey('dc01') -or $compromisedAccounts.ContainsKey('dcsync_replication')) }
+  )
+
+  $edges = @(
+    [PSCustomObject]@{ source = 'u1'; target = 'h1'; relation = 'HasSession'; label = 'Logged On' },
+    [PSCustomObject]@{ source = 'h1'; target = 'u2'; relation = 'Kerberoast'; label = 'Kerberoastable SPN' },
+    [PSCustomObject]@{ source = 'u2'; target = 'g1'; relation = 'MemberOf'; label = 'Group Member' },
+    [PSCustomObject]@{ source = 'g1'; target = 'h2'; relation = 'AdminTo'; label = 'Local Admin' },
+    [PSCustomObject]@{ source = 'h2'; target = 'u3'; relation = 'HasSession'; label = 'Cached Credential' },
+    [PSCustomObject]@{ source = 'u3'; target = 'g0'; relation = 'MemberOf'; label = 'Member of DA' },
+    [PSCustomObject]@{ source = 'g0'; target = 'dc'; relation = 'DCSync'; label = 'Replication Rights (Tier 0)' }
+  )
+
+  return [PSCustomObject]@{
+    nodes = $nodes
+    edges = $edges
+    shortestPathHops = 3
+    tier0Compromised = [bool]($compromisedAccounts.ContainsKey('adm-da') -or $compromisedHosts.ContainsKey('dc01') -or $compromisedAccounts.ContainsKey('dcsync_replication'))
+  }
+}
 
 # ============================================================
 # REPORT - the engagement report (printable HTML reads it)
@@ -2013,6 +2049,7 @@ $Script:MaxObsHosts = 200       # hosts kept (oldest lastSeen evicted)
 $Script:MaxObsHostUsers = 40    # per host
 $Script:MaxObsHostIps = 20      # per host
 $Script:MaxAlertEvents = 20     # contributing events kept per alert
+$Script:MaxInMemoryAlerts = 2000 # hard cap on the in-memory alert list (sentinel-history.csv keeps every row)
 $Script:LastNormFields = $null  # stash: the event being evaluated
 $Script:LastEventTime = $null
 $Script:LastMatchedRule = $null
@@ -3978,6 +4015,7 @@ $Script:StaticFiles = @{
   '/js/pages/settings-audit.js'   = @{ file = 'js/pages/settings-audit.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/chains.js'   = @{ file = 'js/pages/chains.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/assets.js'   = @{ file = 'js/pages/assets.js';   type = 'application/javascript; charset=utf-8' }
+  '/js/pages/paths.js'    = @{ file = 'js/pages/paths.js';    type = 'application/javascript; charset=utf-8' }
   '/js/pages/reports.js'  = @{ file = 'js/pages/reports.js';  type = 'application/javascript; charset=utf-8' }
   '/css/print.css'        = @{ file = 'css/print.css';        type = 'text/css; charset=utf-8' }
 }
@@ -4293,6 +4331,10 @@ function Invoke-Handler($ctx) {
       '^/api/chains$' {
         if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
         Send-Json $res (ConvertTo-JsonArray (Get-AttackChains))
+      }
+      '^/api/paths$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        Send-Json $res ((Get-AttackPathsPayload) | ConvertTo-Json -Depth 6)
       }
       '^/api/overview$' {
         if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
@@ -5230,9 +5272,15 @@ function Invoke-ChannelBatch($channel, $events, $cap) {
     $recId = [int64]0
     try { $recId = [int64]$e.RecordId } catch { $recId = 0 }
     if ($recId -gt 0) {
-      if ($Script:SeenRecords.ContainsKey($recId)) { continue }
+      # EventRecordID is unique PER LOG CHANNEL, not globally: the Security and
+      # System logs (and the Defender channel) each keep their own counter, so the
+      # same numeric id in two channels is two different events. Keying by the
+      # bare id dropped the second one - a real missed-detection bug across
+      # channels. Include the channel in the key.
+      $seenKey = "$channel|$recId"
+      if ($Script:SeenRecords.ContainsKey($seenKey)) { continue }
       # marked seen BEFORE evaluation: a poison event must not be retried forever
-      $Script:SeenRecords[$recId] = Get-Date
+      $Script:SeenRecords[$seenKey] = Get-Date
     }
     $evaluated++
     $alert = $null
