@@ -10,6 +10,7 @@
     '/alerts': 'alerts',
     '/chains': 'chains',
     '/assets': 'assets',
+    '/paths': 'paths',
     '/rules': 'rules',
     '/events': 'events',
     '/reports': 'reports',
