@@ -44,26 +44,38 @@
         removeBtn.addEventListener('click', function () { openRemove(r, load); });
         actions.appendChild(removeBtn);
       }
+
+      var userBadge = S.ui.el('span', { class: 'pill pill-brand', style: 'padding:2px 8px;font-size:11px', text: 'You' });
+      var roleBadge = S.ui.el('span', { class: 'badge', text: 'Console Admin' });
+
       tbody.appendChild(S.ui.el('tr', {}, [
-        S.ui.el('td', { class: 'cell-strong', text: r.name + (r.current ? ' (you)' : '') }),
-        S.ui.el('td', { text: S.ui.fmtDateTime(r.created) }),
-        S.ui.el('td', { text: S.ui.fmtDateTime(r.updated) }),
+        S.ui.el('td', {}, [
+          S.ui.el('div', { style: 'display:flex;align-items:center;gap:8px' }, [
+            S.ui.el('span', { class: 'cell-strong', text: r.name }),
+            r.current ? userBadge : roleBadge
+          ])
+        ]),
+        S.ui.el('td', { class: 'cell-dim', text: S.ui.fmtDateTime(r.created) }),
+        S.ui.el('td', { class: 'cell-mute', text: S.ui.fmtDateTime(r.updated) }),
         actions
       ]));
     });
-    view.appendChild(S.ui.el('div', { class: 'card' }, [
+
+    var accountsCard = S.ui.el('div', { class: 'card' }, [
       S.ui.el('div', { class: 'card-head' }, [
-        S.ui.el('h2', { text: 'Accounts' }),
+        S.ui.el('h2', { text: 'Dashboard Administrators' }),
         S.ui.el('span', { class: 'grow spacer' }),
-        S.ui.el('span', { class: 'caption', text: rows.length + ' account(s)' })
+        S.ui.el('span', { class: 'caption', text: rows.length + ' account(s) registered' })
       ]),
-      S.ui.el('div', { class: 'card-body' }, [
-        S.ui.el('table', { class: 'data' }, [
-          S.ui.el('thead', {}, [S.ui.el('tr', {}, ['Name', 'Created', 'Last changed', ''].map(function (h) { return S.ui.el('th', { text: h }); }))]),
-          tbody
+      S.ui.el('div', { class: 'card-body tight' }, [
+        S.ui.el('div', { class: 'table-wrap' }, [
+          S.ui.el('table', { class: 'data' }, [
+            S.ui.el('thead', {}, [S.ui.el('tr', {}, ['Account', 'Created', 'Last Changed', 'Actions'].map(function (h) { return S.ui.el('th', { text: h }); }))]),
+            tbody
+          ])
         ])
       ])
-    ]));
+    ]);
 
     /* ---- create ---- */
     var form = S.ui.el('form', { class: 'card-form', novalidate: 'novalidate' });
@@ -71,18 +83,19 @@
     var theirPass = passwordInput('uNewPass', 'new-password');
     var myPass = passwordInput('uMyPass', 'current-password');
     var rowName = S.ui.el('div', { class: 'form-row' }, [
-      S.ui.el('label', { class: 'form-label', for: 'uNewName', text: 'Name' }), name,
+      S.ui.el('label', { class: 'form-label', for: 'uNewName', text: 'Username' }), name,
       S.ui.el('div', { class: 'form-hint', text: '3-32 characters: A-Z, a-z, 0-9, dot, underscore, hyphen.' })
     ]);
     var rowTheir = S.ui.el('div', { class: 'form-row' }, [
-      S.ui.el('label', { class: 'form-label', for: 'uNewPass', text: 'Their password' }), theirPass,
-      S.ui.el('div', { class: 'form-hint', text: 'At least 12 characters.' })
+      S.ui.el('label', { class: 'form-label', for: 'uNewPass', text: 'Initial Password' }), theirPass,
+      S.ui.el('div', { class: 'form-hint', text: 'Minimum 12 characters. User can change it later.' })
     ]);
     var rowMine = S.ui.el('div', { class: 'form-row' }, [
-      S.ui.el('label', { class: 'form-label', for: 'uMyPass', text: 'Your password' }), myPass
+      S.ui.el('label', { class: 'form-label', for: 'uMyPass', text: 'Your Password (Re-authentication)' }), myPass,
+      S.ui.el('div', { class: 'form-hint', text: 'Required to authorize user creation.' })
     ]);
     var msg = formMsg();
-    var submit = S.ui.el('button', { class: 'btn btn-primary', type: 'submit', text: 'Create account' });
+    var submit = S.ui.el('button', { class: 'btn btn-primary', type: 'submit', text: 'Create User' });
     form.appendChild(rowName); form.appendChild(rowTheir); form.appendChild(rowMine);
     form.appendChild(msg);
     form.appendChild(S.ui.el('div', { class: 'form-actions' }, [submit]));
@@ -102,10 +115,14 @@
         msg.className = 'form-msg form-msg-bad';
       }).then(function () { submit.disabled = false; });
     });
-    view.appendChild(S.ui.el('div', { class: 'card' }, [
-      S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Create an account' })]),
+
+    var createCard = S.ui.el('div', { class: 'card' }, [
+      S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Create New Account' })]),
       S.ui.el('div', { class: 'card-body' }, [form])
-    ]));
+    ]);
+
+    var layout = S.ui.el('div', { class: 'settings-layout' }, [accountsCard, createCard]);
+    view.appendChild(layout);
 
     /* ---- the confirm dialogs ---- */
     function openReset(row, done) {
