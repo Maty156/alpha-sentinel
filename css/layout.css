@@ -9,28 +9,39 @@
   display: flex; flex-direction: column; gap: var(--s-2);
   padding: var(--s-4) var(--s-3);
   position: sticky; top: 0; height: 100vh;
+  z-index: 10;
 }
 .brand { display: flex; align-items: center; gap: var(--s-2); color: var(--brand); padding: 0 var(--s-2) var(--s-4); }
-.brand .brand-mark { width: 26px; height: 26px; flex: 0 0 auto; }
+.brand .brand-mark { width: 26px; height: 26px; flex: 0 0 auto; filter: drop-shadow(0 0 6px var(--brand-glow)); }
 .brand-name { font-weight: 700; letter-spacing: 1.2px; font-size: 15px; text-transform: uppercase; }
-.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav { display: flex; flex-direction: column; gap: 3px; }
 .nav-item {
   display: flex; align-items: center; gap: var(--s-3);
-  padding: 9px 10px; border-radius: var(--radius-sm);
+  padding: 9px 12px; border-radius: var(--radius-sm);
   color: var(--text-dim); border-left: 2px solid transparent; cursor: pointer;
+  transition: all 0.15s ease;
 }
 .nav-item:hover { background: var(--bg-2); color: var(--text); text-decoration: none; }
-.nav-item.active { color: var(--text); background: var(--brand-soft); border-left-color: var(--brand); }
-.nav-item.active .nav-icon { color: var(--brand); }
-.nav-icon { width: 17px; height: 17px; flex: 0 0 auto; color: var(--text-mute); }
-.nav-label { flex: 1 1 auto; }
+.nav-item.active {
+  color: var(--text);
+  background: var(--brand-soft);
+  border-left-color: var(--brand);
+  box-shadow: -2px 0 10px rgba(210, 16, 60, 0.25);
+}
+.nav-item.active .nav-icon { color: var(--brand); filter: drop-shadow(0 0 4px var(--brand-glow)); }
+.nav-icon { width: 17px; height: 17px; flex: 0 0 auto; color: var(--text-mute); transition: color 0.15s ease; }
+.nav-label { flex: 1 1 auto; font-weight: 500; font-size: var(--fs-table); }
 .nav-count {
   background: var(--sev-critical); color: #1a0a10; font-size: 11px; font-weight: 700;
   border-radius: var(--radius-pill); padding: 1px 7px;
+  box-shadow: 0 0 8px var(--sev-critical);
 }
 .nav-item.disabled { opacity: 0.45; cursor: default; }
 .nav-item.disabled:hover { background: none; color: var(--text-dim); }
 .nav-soon { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-mute); border: 1px solid var(--line-2); border-radius: var(--radius-pill); padding: 0 6px; }
+.app.collapsed .nav-item { justify-content: center; padding: 10px 0; border-left: 2px solid transparent; }
+.app.collapsed .nav-item.active { border-left-color: var(--brand); }
+.app.collapsed .brand { justify-content: center; padding: 0 0 var(--s-4); }
 .app.collapsed .nav-label, .app.collapsed .nav-count, .app.collapsed .nav-soon,
 .app.collapsed .brand-name { display: none; }
 
@@ -39,14 +50,17 @@
 .topbar {
   display: flex; align-items: center; gap: var(--s-3);
   height: var(--topbar-h); padding: 0 var(--s-5);
-  border-bottom: 1px solid var(--line); background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   position: sticky; top: 0; z-index: 5;
 }
 .topbar .spacer { flex: 1 1 auto; }
 .page-sub { color: var(--text-mute); font-size: var(--fs-cap); }
 .topbar-title { display: flex; flex-direction: column; }
-.sidebar-toggle { background: none; border: 1px solid var(--line); color: var(--text-dim); border-radius: var(--radius-sm); padding: 4px 8px; cursor: pointer; }
-.sidebar-toggle:hover { color: var(--text); border-color: var(--line-2); }
+.sidebar-toggle { background: none; border: 1px solid var(--line); color: var(--text-dim); border-radius: var(--radius-sm); padding: 4px 8px; cursor: pointer; transition: all 0.15s ease; }
+.sidebar-toggle:hover { color: var(--text); border-color: var(--line-2); background: var(--bg-2); }
 
 /* ---- content ---- */
 .view { padding: var(--s-5); display: flex; flex-direction: column; gap: var(--s-3); }
@@ -58,27 +72,34 @@
 /* ---- drawer ---- */
 .drawer {
   position: fixed; top: 0; right: 0; height: 100vh; width: var(--drawer-w); max-width: 96vw;
-  background: var(--bg-1); border-left: 1px solid var(--line); box-shadow: var(--shadow);
-  transform: translateX(101%); transition: transform 0.18s ease; z-index: 20;
+  background: var(--surface-card);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-left: 1px solid var(--line); box-shadow: var(--shadow);
+  transform: translateX(101%); transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1); z-index: 20;
   display: flex; flex-direction: column;
 }
 .drawer.open { transform: translateX(0); }
-.drawer-head { display: flex; align-items: flex-start; gap: var(--s-2); padding: var(--s-4); border-bottom: 1px solid var(--line); }
+.drawer-head { display: flex; align-items: flex-start; gap: var(--s-2); padding: var(--s-4); border-bottom: 1px solid var(--line); background: var(--surface-glass); }
 .drawer-body { padding: var(--s-4); overflow-y: auto; display: flex; flex-direction: column; gap: var(--s-4); }
-.drawer-close { background: none; border: 0; color: var(--text-mute); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.drawer-close { background: none; border: 0; color: var(--text-mute); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; transition: color 0.15s ease; }
 .drawer-close:hover { color: var(--text); }
-.backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 15; }
+.backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.65); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 15; }
 
 @media (max-width: 1500px) {
   .grid-2 { grid-template-columns: 1.3fr 1fr; }
 }
 @media (max-width: 1200px) {
-  .app { grid-template-columns: var(--sidebar-w-collapsed) 1fr; }
-  .app .nav-label, .app .nav-count, .app .nav-soon, .app .brand-name { display: none; }
   .grid-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .grid-2 { grid-template-columns: 1fr; }
 }
 @media (max-width: 780px) {
   .grid-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .view { padding: var(--s-3); }
+}
+@media (max-width: 720px) {
+  .app { grid-template-columns: var(--sidebar-w-collapsed) 1fr; }
+  .app .nav-label, .app .nav-count, .app .nav-soon, .app .brand-name { display: none; }
+  .app .nav-item { justify-content: center; padding: 10px 0; }
+  .app .brand { justify-content: center; }
 }
