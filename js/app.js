@@ -133,6 +133,7 @@
 
   function boot() {
     wireShell();
+    if (S.pages.bot && S.pages.bot.mount) { S.pages.bot.mount(); }
     S.api.get('/api/session', 'boot').then(function (session) {
       var who = document.getElementById('whoami');
       if (who) { who.textContent = session && session.user ? session.user : 'signed in'; }
