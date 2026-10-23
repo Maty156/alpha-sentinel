@@ -294,7 +294,7 @@ Eight pages, one file each (see `js/pages/`):
   alert-timeline appendix. It is a framed document with `css/print.css` for
   printing to PDF, and it says so plainly when the period is empty. Dates are
   validated (junk is refused, ranges over 31 days are refused).
-- **Detection Rules** - all 28 families with their audit-policy state: Working,
+- **Detection Rules** - all 30 families with their audit-policy state: Working,
   amber **Unverified** when the policy could not be read (that is not working, and
   it is counted separately in the header), or BLIND with the reason and the exact
   `auditpol` command that fixes it.
@@ -337,7 +337,7 @@ page name. Nothing is inline: no style or script element, no `on*` attribute, an
 Files are served from a **strict allowlist** (exact name, exact content type), so an
 unknown path or a `../` traversal is a plain 404.
 
-## Detection coverage (28 rule families)
+## Detection coverage (30 rule families)
 
 The catalog mirrors `alpha/utils/detectionRules.js` key-for-key - same rule keys,
 severities and event IDs, so an alert promoted in either product lands on the
@@ -380,7 +380,7 @@ patterns, because those log on and replicate continuously by design - see the
 
 **1. Self-test (plumbing + thresholds).** The **Self-test** button in the
 dashboard, or `POST /api/self-test`. One synthetic event sequence per rule family
-through the real engine; reports how many of the 28 fired.
+through the real engine; reports how many of the 30 fired.
 
 **2. Fixture replay (field shapes).** The self-test invents its field names, so
 it cannot catch a rule reading the wrong field or the wrong channel. For that,
