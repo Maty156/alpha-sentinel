@@ -1621,9 +1621,9 @@ try {
   Assert-True ($raw.Contains('if ($null -eq $i) { continue }')) 'and a null element is skipped rather than serialised'
 
   # --- 6. polish -----------------------------------------------------------
-  Assert-True ($Script:SentinelVersion -eq '2.5.0') 'the version is 2.5.0'
-  Assert-True ($raw.Contains('ALPHA SENTINEL v2.5.0')) 'the script header says v2.5.0'
-  Assert-True ($raw.Contains('ALPHA SENTINEL v2.5.0 - AD / Network Attack Monitor')) 'and so does the startup banner'
+  Assert-True ($Script:SentinelVersion -eq '2.6.0') 'the version is 2.6.0'
+  Assert-True ($raw.Contains('ALPHA SENTINEL v2.6.0')) 'the script header says v2.6.0'
+  Assert-True ($raw.Contains('ALPHA SENTINEL v2.6.0 - AD / Network Attack Monitor')) 'and so does the startup banner'
 
   # account names, not distinguished names
   Assert-True ((ConvertTo-AccountName 'CN=attacker,OU=Corp,DC=example,DC=local') -eq 'attacker') 'a DN is trimmed to the account'
