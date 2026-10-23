@@ -16,29 +16,25 @@
 </head>
 <body>
 <div class="app">
+<aside class="sidebar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <path d="M12 2l8 3v6c0 5-3.4 9.3-8 11-4.6-1.7-8-6-8-11V5l8-3z"/>
+      <circle cx="12" cy="11" r="3.2"/>
+      <path d="M12 4.6v2.2M12 15.2v2.2M5.6 11h2.2M16.2 11h2.2"/>
+    </svg>
+    <span class="brand-name">Alpha Sentinel</span>
+  </div>
 
-  <aside class="sidebar">
-    <div class="brand">
-      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-        <path d="M12 2l8 3v6c0 5-3.4 9.3-8 11-4.6-1.7-8-6-8-11V5l8-3z"/>
-        <circle cx="12" cy="11" r="3.2"/>
-        <path d="M12 4.6v2.2M12 15.2v2.2M5.6 11h2.2M16.2 11h2.2"/>
-      </svg>
-      <span class="brand-name">Alpha Sentinel</span>
-    </div>
-
-    <nav class="nav" aria-label="pages">
-      <a class="nav-item" href="#/overview" data-page="overview"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span class="nav-label">Overview</span></a>
-      <a class="nav-item" href="#/alerts" data-page="alerts"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 16H3L12 3z"/><path d="M12 9v4M12 16.5v.5"/></svg><span class="nav-label">Alerts</span><span class="nav-count" id="alertCount" hidden></span></a>
-      <a class="nav-item" href="#/chains" data-page="chains"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18c4-1 5-7 9-9M14 5l3 3-4 4"/><circle cx="19" cy="5" r="1.6"/><circle cx="5" cy="19" r="1.6"/></svg><span class="nav-label">Attack Chains</span></a>
-      <a class="nav-item" href="#/assets" data-page="assets"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span class="nav-label">Assets</span></a>
-      <a class="nav-item" href="#/rules" data-page="rules"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.4-2.9 8.2-7 9.5-4.1-1.3-7-5.1-7-9.5V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg><span class="nav-label">Detection Rules</span></a>
-
-      <a class="nav-item" href="#/paths" data-page="paths"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="6" r="2.4"/><path d="M8 16.5L16 7.5"/></svg><span class="nav-label">Attack Paths</span></a>
-
-      <a class="nav-item" href="#/reports" data-page="reports"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M10 13h6M10 17h6"/></svg><span class="nav-label">Reports</span></a>
-      <a class="nav-item" href="#/settings" data-page="settings"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.4M12 18.6V21M4.2 7.5l2 1.2M17.8 15.3l2 1.2M4.2 16.5l2-1.2M17.8 8.7l2-1.2"/></svg><span class="nav-label">Settings</span></a>
-    </nav>
+  <nav class="nav" aria-label="pages">
+    <a class="nav-item" href="#/overview" data-page="overview"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span class="nav-label">Overview</span></a>
+    <a class="nav-item" href="#/alerts" data-page="alerts"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 16H3L12 3z"/><path d="M12 9v4M12 16.5v.5"/></svg><span class="nav-label">Alerts</span><span class="nav-count" id="alertCount" hidden></span></a>
+    <a class="nav-item" href="#/chains" data-page="chains"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18c4-1 5-7 9-9M14 5l3 3-4 4"/><circle cx="19" cy="5" r="1.6"/><circle cx="5" cy="19" r="1.6"/></svg><span class="nav-label">Attack Chains</span></a>
+    <a class="nav-item" href="#/assets" data-page="assets"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span class="nav-label">Assets</span></a>
+    <a class="nav-item" href="#/rules" data-page="rules"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.4-2.9 8.2-7 9.5-4.1-1.3-7-5.1-7-9.5V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg><span class="nav-label">Detection Rules</span></a>
+    <a class="nav-item" href="#/paths" data-page="paths"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="6" r="2.4"/><path d="M8 16.5L16 7.5"/></svg><span class="nav-label">Attack Paths</span></a>
+    <a class="nav-item" href="#/reports" data-page="reports"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M10 13h6M10 17h6"/></svg><span class="nav-label">Reports</span></a>
+    <a class="nav-item" href="#/settings" data-page="settings"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.4M12 18.6V21M4.2 7.5l2 1.2M17.8 15.3l2 1.2M4.2 16.5l2-1.2M17.8 8.7l2-1.2"/></svg><span class="nav-label">Settings</span></a>
   </aside>
 
   <div class="main">
@@ -67,6 +63,11 @@
           <button class="user-item" id="menuAccount" type="button">Account</button>
           <button class="user-item user-item-logout" id="logout" type="button">Logout</button>
         </div>
+        <div id="sentinel-bot-nav" style="margin-top: 8px; padding: 8px; border-top: 1px solid #e2e8f0;">
+          <button class="chip" style="width: 100%;" id="botOpenBtn" type="button" title="Open Wolf assistant">
+            🐺 Ask Wolf
+          </button>
+        </div>
       </div>
     </header>
 
@@ -94,6 +95,7 @@
 <script src="/js/pages/settings-account.js"></script>
 <script src="/js/pages/settings-users.js"></script>
 <script src="/js/pages/settings-audit.js"></script>
+<script src="/js/pages/bot.js"></script>
 <script src="/js/app.js"></script>
 </body>
 </html>
