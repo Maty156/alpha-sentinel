@@ -4016,7 +4016,8 @@ $Script:StaticFiles = @{
   '/js/pages/chains.js'   = @{ file = 'js/pages/chains.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/assets.js'   = @{ file = 'js/pages/assets.js';   type = 'application/javascript; charset=utf-8' }
   '/js/pages/paths.js'    = @{ file = 'js/pages/paths.js';    type = 'application/javascript; charset=utf-8' }
-  '/js/pages/reports.js'  = @{ file = 'js/pages/reports.js';  type = 'application/javascript; charset=utf-8' }
+  '/js/pages/reports.js'  = @{ file = 'js/pages/reports.js'; type = 'application/javascript; charset=utf-8' }
+   '/js/pages/bot.js'     = @{ file = 'js/pages/bot.js'; type = 'application/javascript; charset=utf-8' }
   '/css/print.css'        = @{ file = 'css/print.css';        type = 'text/css; charset=utf-8' }
 }
 
@@ -4229,6 +4230,72 @@ function Invoke-Handler($ctx) {
         $res.Headers.Add('Set-Cookie', "sentinel_session=$sid; Path=/; HttpOnly; SameSite=Strict")
         Send-Json $res (@{ ok = $true; user = $userName; sessionHours = $Script:SessionHours; idleMinutes = $Script:IdleMinutes } | ConvertTo-Json)
       }
+            '^/api/bot/ask$' {
+              # The bot accepts POST JSON {question: "..."} from the floating panel.
+              # It requires a live session (same-origin gate).
+              if ($method -ne 'POST') { Send-Json $res '{"error":"POST only."}' 405; return }
+              if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin refused."}' 403; return }
+              $body = $bodyParsed
+              if (-not $body -or -not $body.question) { Send-Json $res '{"error":"Missing question."}' 400; return }
+              $ip = $clientIp
+              # brute-force gate per IP
+              if (-not (Test-LoginAllowed $ip)) {
+                $retry = Get-LoginRetryAfter $ip
+                try { $res.Headers.Add('Retry-After', "$retry") } catch { }
+                Write-AuthEvent $ip '' 'blocked' "rate limited, $retry s remaining"
+                Send-Json $res '{"error":"Too many attempts from this address. Try again in a few minutes."}' 429
+                return
+              }
+              # Build a concise answer from the dashboard's own API data
+              # Use the in-memory alert list + rule catalog that the poller already maintains
+              $alerts = $Script:Alerts
+              $rules = @(Get-RuleCatalog)
+
+              # Very simple rule-free answer engine:
+              # 1) if there are active alerts, mention count + severity
+              # 2) if we can read coverage data, mention blind/unverified
+              # 3) fallback to general bot greeting
+
+              $answer = ''
+              $activeCount = @($alerts | Where-Object { -not $_.SelfTest -and ($_.Status -eq 'New' -or $_.Status -eq 'Investigating' -or -not $_.Status) }).Count
+              $criticalCount = @($alerts | Where-Object { -not $_.SelfTest -and $_.Severity -eq 'Critical' }).Count
+              $highCount = @($alerts | Where-Object { -not $_.SelfTest -and $_.Severity -eq 'High' }).Count
+
+              # Question keywords
+              $q = [string]::ToLower($body.question)
+              if ($q -match 'critical|high|medium|low') {
+                $answer += "Active alerts: $activeCount total ($criticalCount critical, $highCount high).`n"
+              }
+              if ($q -match 'rules|family|blind|unverified') {
+                $ruleCount = $rules.Count
+                $blindCount = @($rules | Where-Object { $_.auditState -eq 'blind' }).Count
+                $unknownCount = @($rules | Where-Object { $_.auditState -eq 'unknown' }).Count
+                $answer += "Detection coverage: $ruleCount families ($blindCount blind, $unknownCount unverified)`n"
+              }
+              if ($q -match 'chain|attack path') {
+                $answer += "Attack chains are built from alerts sharing an account or source IP within a 60-minute window.`n"
+              }
+              if ($q -match 'kerberoast|as-rep|dcsync') {
+                $answer += "Key AD attack rules: Kerberoasting (Medium/High), AS-REP Roasting (High/Critical), DCSync (Critical). All require specific audit policy subcategories to be enabled.`n"
+              }
+              if ($q -match 'login|brute|spray') {
+                $answer += "Credential detection: password spraying, brute-force single account, NTLM auth failures, kerberos preauth spraying. All deduplicated per entity.`n"
+              }
+              if ($q -match 'persistence|registry|scheduled') {
+                $answer += "Persistence detection: scheduled tasks, registry Run keys, service creation/modification.`n"
+              }
+              if ($q -match 'evasion|log|audit|defender|firewall') {
+                $answer += "Defense evasion: log tampering, audit policy changes, event log service stops, Defender disabled, firewall profile disabled.`n"
+              }
+              if ($q -match 'account|create|delete|enable|disable') {
+                $answer += "Account monitoring: creation, deletion, enable/disable, group membership changes, password resets by admin.`n"
+              }
+              if ($answer -eq '') {
+                $answer = "I'm Wolf, your AD sentinel assistant. I can tell you about active alerts, detection coverage, rule status, and attack chains. Try asking: `how many critical alerts?`, `what's blind?`, `show attack chains`, or `what is kerberoasting?`"
+              }
+
+              Send-Json $res (@{ ok = $true; answer = $answer } | ConvertTo-Json)
+            }
       '^/api/logout$' {
         $sid = Get-SessionIdFromContext $ctx
         $who = Get-SessionUser $ctx
@@ -4686,8 +4753,9 @@ function Invoke-Handler($ctx) {
           return
         }
         $null = Remove-UserRecord $target
-        $ended = Revoke-UserSessions $target
-        Write-AuthEvent $clientIp $me 'success' ("user removed: " + $target + "; " + $ended + " session(s) ended")
+                $ended = Revoke-UserSessions $target
+                $msg = "user removed: " + $target + "; " + $ended + " session(s) ended"
+                Write-AuthEvent $clientIp $me 'success' $msg
         Send-Json $res (@{ ok = $true; sessionsEnded = $ended } | ConvertTo-Json)
       }
       '^/api/account/avatar$' {
@@ -5027,7 +5095,7 @@ function Forward-ToWeb($alert) {
     # /api/health so it stops looking like "no alerts are happening"
     $Script:ForwardFailures++
     if ($Script:ForwardFailures -le 3 -or ($Script:ForwardFailures % 25) -eq 0) {
-      Write-Host "  [forward] failed ($($Script:ForwardFailures) total): $_" -ForegroundColor DarkYellow
+      Write-Host "  [forward] failed ($($Script:ForwardFailures total)): $_" -ForegroundColor DarkYellow
     }
   }
 }
