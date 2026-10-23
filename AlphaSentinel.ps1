@@ -1,5 +1,5 @@
-# ============================================================================
-# ALPHA SENTINEL v2.5.0 - AD / Network Attack Monitor (background service + web UI)
+﻿# ============================================================================
+# ALPHA SENTINEL v2.6.0 - AD / Network Attack Monitor (background service + web UI)
 # ============================================================================
 # A standalone Windows security monitor from the ALPHA Cybersecurity project.
 # Like Wazuh's agent+dashboard model, but as ONE script with zero dependencies:
@@ -109,7 +109,6 @@
 #   powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -Stop
 #   Stop-Sentinel   (helper function, when running in the same session)
 # ============================================================================
-#Requires -RunAsAdministrator
 
 param(
   [int]$Port = 8443,
@@ -2030,7 +2029,7 @@ $Script:MaxBodyStalls = 3       # stalls from one address before it is blocked
 $Script:BodyStalls = @{}        # ip -> stalls seen (in-memory, per process)
 
 # ---- ALPHA SENTINEL version ------------------------------------------------
-$Script:SentinelVersion = '2.5.0'
+$Script:SentinelVersion = '2.6.0'
 # true only when the operator started the monitor with -DemoData: the dashboard
 # then labels itself as a demo instead of pretending the numbers are real
 $Script:DemoData = [bool]$DemoData
@@ -4262,7 +4261,7 @@ function Invoke-Handler($ctx) {
               $highCount = @($alerts | Where-Object { -not $_.SelfTest -and $_.Severity -eq 'High' }).Count
 
               # Question keywords
-              $q = [string]::ToLower($body.question)
+              $q = "$($body.question)".ToLower()
               if ($q -match 'critical|high|medium|low') {
                 $answer += "Active alerts: $activeCount total ($criticalCount critical, $highCount high).`n"
               }
@@ -4291,7 +4290,7 @@ function Invoke-Handler($ctx) {
                 $answer += "Account monitoring: creation, deletion, enable/disable, group membership changes, password resets by admin.`n"
               }
               if ($answer -eq '') {
-                $answer = "I'm Wolf, your AD sentinel assistant. I can tell you about active alerts, detection coverage, rule status, and attack chains. Try asking: `how many critical alerts?`, `what's blind?`, `show attack chains`, or `what is kerberoasting?`"
+                $answer = "I'm Wolf, your AD sentinel assistant. I can tell you about active alerts, detection coverage, rule status, and attack chains. Try asking: 'how many critical alerts?', 'what's blind?', 'show attack chains', or 'what is kerberoasting?'"
               }
 
               Send-Json $res (@{ ok = $true; answer = $answer } | ConvertTo-Json)
@@ -5095,7 +5094,7 @@ function Forward-ToWeb($alert) {
     # /api/health so it stops looking like "no alerts are happening"
     $Script:ForwardFailures++
     if ($Script:ForwardFailures -le 3 -or ($Script:ForwardFailures % 25) -eq 0) {
-      Write-Host "  [forward] failed ($($Script:ForwardFailures total)): $_" -ForegroundColor DarkYellow
+      Write-Host "  [forward] failed ($($Script:ForwardFailures) total): $_" -ForegroundColor DarkYellow
     }
   }
 }
@@ -5572,7 +5571,7 @@ if ($usersState.ok) {
 
 Write-Host ""
 Write-Host "  ============================================================" -ForegroundColor Red
-Write-Host "   ALPHA SENTINEL v2.5.0 - AD / Network Attack Monitor" -ForegroundColor Red
+Write-Host "   ALPHA SENTINEL v2.6.0 - AD / Network Attack Monitor" -ForegroundColor Red
 Write-Host "  ============================================================" -ForegroundColor Red
 if ($listener) {
   if (-not $Bind -or $Bind -eq 'localhost' -or $Bind -eq '127.0.0.1') {
