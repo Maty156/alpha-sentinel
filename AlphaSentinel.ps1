@@ -184,10 +184,17 @@ function global:Stop-Sentinel {
     if ($targetPid -gt 0) {
       $proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
       if ($proc) {
-        Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
-        Write-Host "stopped sentinel process $targetPid"
-        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-        return
+        # Verify the PID belongs to a powershell/pwsh process running AlphaSentinel
+        $cmdLine = $proc.CommandLine
+        if ($cmdLine -and ($cmdLine -like '*AlphaSentinel.ps1*' -or $cmdLine -like '*AlphaSentinel*')) {
+          Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
+          Write-Host "stopped sentinel process $targetPid"
+          Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+          return
+        } else {
+          Write-Host "PID $targetPid does not belong to an AlphaSentinel process (command line: $cmdLine). Removing stale pid file."
+          Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+        }
       }
     }
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
