@@ -270,5 +270,33 @@
    "suspicious_process_creation"
   ],
   "note": "Normal notepad.exe launch - no suspicious patterns."
+ },
+ "ps-4104-mimikatz.xml": {
+  "expect": [
+   "powershell_scriptblock"
+  ],
+  "forbid": [],
+  "note": "Invoke-Mimikatz in script block - credential dumping tool."
+ },
+ "ps-4104-base64-iex.xml": {
+  "expect": [
+   "powershell_scriptblock"
+  ],
+  "forbid": [],
+  "note": "FromBase64String + IEX pattern - encoded payload execution."
+ },
+ "ps-4104-amsiutils.xml": {
+  "expect": [
+   "powershell_scriptblock"
+  ],
+  "forbid": [],
+  "note": "AmsiUtils AMSI bypass attempt - disabling AMSI."
+ },
+ "ps-4104-benign.xml": {
+  "expect": [],
+  "forbid": [
+   "powershell_scriptblock"
+  ],
+  "note": "Normal administrative PowerShell command - Get-Service."
  }
 }

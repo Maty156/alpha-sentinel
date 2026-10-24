@@ -1,0 +1,27 @@
+<Events>
+<Event>
+  <System>
+    <Provider Name="Microsoft-Windows-PowerShell" Guid="{A0C1853B-5C40-4B15-8766-3CF1C58F985A}" />
+    <EventID>4104</EventID>
+    <Version>0</Version>
+    <Level>0</Level>
+    <Task>5</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x4000000000000000</Keywords>
+    <TimeCreated SystemTime="2026-01-15T10:15:00.0000000Z" />
+    <EventRecordID>100016</EventRecordID>
+    <Correlation />
+    <Execution ProcessID="528" ThreadID="532" />
+    <Channel>Microsoft-Windows-PowerShell/Operational</Channel>
+    <Computer>DC01.selftest.local</Computer>
+    <Security UserID="S-1-5-21-1234567890-1234567890-1234567890-1104" />
+  </System>
+  <EventData>
+    <Data Name="ContextInfo">Module=Microsoft.PowerShell.Core,User=jsmith</Data>
+    <Data Name="Message">Get-Service | Where-Object {$_.Status -eq 'Running'} | Select-Object Name, Status</Data>
+    <Data Name="User">jsmith</Data>
+    <Data Name="ProcessId">1243</Data>
+    <Data Name="Computer">DC01.selftest.local</Data>
+  </EventData>
+</Event>
+</Events>
