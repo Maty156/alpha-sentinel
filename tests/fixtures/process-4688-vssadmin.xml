@@ -1,0 +1,37 @@
+<Events>
+<Event>
+  <System>
+    <Provider Name="Microsoft-Windows-Security-Auditing" Guid="{54849625-5478-4994-A5BA-3E3B0328C30D}" />
+    <EventID>4688</EventID>
+    <Version>5</Version>
+    <Level>0</Level>
+    <Task>13312</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x8020000000000000</Keywords>
+    <TimeCreated SystemTime="2026-01-15T10:09:00.0000000Z" />
+    <EventRecordID>100010</EventRecordID>
+    <Correlation />
+    <Execution ProcessID="528" ThreadID="532" />
+    <Channel>Security</Channel>
+    <Computer>DC01.selftest.local</Computer>
+    <Security />
+  </System>
+  <EventData>
+    <Data Name="SubjectUserSid">S-1-5-21-1234567890-1234567890-1234567890-1104</Data>
+    <Data Name="SubjectUserName">jsmith</Data>
+    <Data Name="SubjectDomainName">SELFTEST</Data>
+    <Data Name="SubjectLogonId">0x1234B</Data>
+    <Data Name="NewProcessId">0x4D3</Data>
+    <Data Name="NewProcessName">C:\Windows\System32\vssadmin.exe</Data>
+    <Data Name="TokenElevationType">%%1936</Data>
+    <Data Name="ProcessId">0x1235</Data>
+    <Data Name="CommandLine">vssadmin delete shadows /for=C: /oldest</Data>
+    <Data Name="TargetUserSid">S-1-5-18</Data>
+    <Data Name="TargetUserName">SYSTEM</Data>
+    <Data Name="TargetDomainName">SELFTEST</Data>
+    <Data Name="TargetLogonId">0x3E7</Data>
+    <Data Name="ParentProcessName">C:\Windows\System32\cmd.exe</Data>
+    <Data Name="ParentProcessId">0x162E</Data>
+  </EventData>
+</Event>
+</Events>

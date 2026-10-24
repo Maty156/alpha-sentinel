@@ -242,5 +242,33 @@
    "computer_account_abuse"
   ],
   "note": "An admin creating a computer account is normal domain join activity."
+ },
+ "process-4688-ntdsutil.xml": {
+  "expect": [
+   "suspicious_process_creation"
+  ],
+  "forbid": [],
+  "note": "ntdsutil invoked for IFM backup - AD database extraction technique."
+ },
+ "process-4688-vssadmin.xml": {
+  "expect": [
+   "suspicious_process_creation"
+  ],
+  "forbid": [],
+  "note": "vssadmin delete shadows - shadow copy deletion for anti-forensics."
+ },
+ "process-4688-reg-save.xml": {
+  "expect": [
+   "suspicious_process_creation"
+  ],
+  "forbid": [],
+  "note": "reg save of SYSTEM hive - credential dumping preparation."
+ },
+ "process-4688-benign.xml": {
+  "expect": [],
+  "forbid": [
+   "suspicious_process_creation"
+  ],
+  "note": "Normal notepad.exe launch - no suspicious patterns."
  }
 }
