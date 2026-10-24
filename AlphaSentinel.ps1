@@ -2299,6 +2299,19 @@ function Get-NormalizedEvent($e) {
     { $_ -in 5001, 5010, 5012 } {
       $f.eventSource = "Microsoft-Windows-Windows Defender"
     }
+    5136 {
+      $f.subjectUserName     = Get-Field $xml "SubjectUserName"
+      $f.accountName         = Get-Field $xml "SubjectUserName"
+      $f.objectClass         = Get-Field $xml "ObjectClass"
+      $f.objectName          = Get-Field $xml "ObjectName"
+      $f.objectGUID          = Get-Field $xml "ObjectGUID"
+      $f.objectType          = Get-Field $xml "ObjectType"
+      $f.attributeLDAPDisplayName = Get-Field $xml "AttributeLDAPDisplayName"
+      $f.attributeSyntaxOID  = Get-Field $xml "AttributeSyntaxOID"
+      $f.attributeValue      = Get-Field $xml "AttributeValue"
+      $f.operationType       = Get-Field $xml "OperationType"
+      $f.operationCount      = Get-Field $xml "OperationCount"
+    }
   }
 
   # drop empty fields - a rule should see "absent", not "present but empty"

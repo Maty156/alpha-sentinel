@@ -1,0 +1,35 @@
+<Events>
+<Event>
+  <System>
+    <Provider Name="Microsoft-Windows-Security-Auditing" Guid="{54849625-5478-4994-A5BA-3E3B0328C30D}" />
+    <EventID>5136</EventID>
+    <Version>0</Version>
+    <Level>0</Level>
+    <Task>13568</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x8020000000000000</Keywords>
+    <TimeCreated SystemTime="2026-01-15T10:03:00.0000000Z" />
+    <EventRecordID>100004</EventRecordID>
+    <Correlation />
+    <Execution ProcessID="528" ThreadID="532" />
+    <Channel>Security</Channel>
+    <Computer>DC01.selftest.local</Computer>
+    <Security />
+  </System>
+  <EventData>
+    <Data Name="SubjectUserSid">S-1-5-21-1234567890-1234567890-1234567890-500</Data>
+    <Data Name="SubjectUserName">administrator</Data>
+    <Data Name="SubjectDomainName">SELFTEST</Data>
+    <Data Name="SubjectLogonId">0x12345</Data>
+    <Data Name="ObjectClass">user</Data>
+    <Data Name="ObjectName">CN=svc-target,CN=Users,DC=selftest,DC=local</Data>
+    <Data Name="ObjectGUID">{C5F7H345-3456-3456-3456-345678901234}</Data>
+    <Data Name="ObjectType">{C5F7H345-3456-3456-3456-345678901234}</Data>
+    <Data Name="AttributeLDAPDisplayName">sIDHistory</Data>
+    <Data Name="AttributeSyntaxOID">2.5.5.17</Data>
+    <Data Name="AttributeValue">S-1-5-21-1234567890-1234567890-1234567890-500</Data>
+    <Data Name="OperationType">Value added</Data>
+    <Data Name="OperationCount">1</Data>
+  </EventData>
+</Event>
+</Events>

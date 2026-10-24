@@ -177,5 +177,46 @@
    "anonymous_smb_session"
   ],
   "note": "A type-3 logon with a REAL account - ordinary network traffic, must not be treated as a null session."
+ },
+ "gpo-5136-group-policy-modified.xml": {
+  "expect": [
+   "gpo_or_admin_object_modified"
+  ],
+  "forbid": [],
+  "note": "A GPO (groupPolicyContainer) was modified by an administrator - displayName attribute changed."
+ },
+ "gpo-5136-gplink-modified.xml": {
+  "expect": [
+   "gpo_or_admin_object_modified"
+  ],
+  "forbid": [],
+  "note": "A GPO link (gPLink) on an OU was modified - potential GPO-based persistence."
+ },
+ "gpo-5136-adminsdholder-modified.xml": {
+  "expect": [
+   "gpo_or_admin_object_modified"
+  ],
+  "forbid": [],
+  "expectSeverity": {
+   "gpo_or_admin_object_modified": "Critical"
+  },
+  "note": "AdminSDHolder nTSecurityDescriptor was modified - controls default security for all protected admin groups (SDProp). This is Critical."
+ },
+ "gpo-5136-sidhistory-modified.xml": {
+  "expect": [
+   "gpo_or_admin_object_modified"
+  ],
+  "forbid": [],
+  "expectSeverity": {
+   "gpo_or_admin_object_modified": "Critical"
+  },
+  "note": "sIDHistory was added to a service account - Golden Ticket / SID History injection indicator. This is Critical."
+ },
+ "gpo-5136-machine-account-benign.xml": {
+  "expect": [],
+  "forbid": [
+   "gpo_or_admin_object_modified"
+  ],
+  "note": "A DC machine account (DC01$) modifying a GPO is normal - must not alert."
  }
 }
