@@ -2670,8 +2670,29 @@ function Evaluate-Event($e) {
       }
     }
 
+    4794 {
+      # 4794: DSRM Password Set - Critical on a DC.
+      # The Directory Services Restore Mode (DSRM) password was changed on a Domain Controller.
+      # This is always Critical - indicates potential compromise (attackers may boot into DSRM
+      # and extract NTDS.dit with a known password).
+      $account = "$($f.accountName)"
+      $subject = "$($f.subjectUserName)"
+      $dsrmChanged = $true  # always true for 4794
+
+      # Skip if subject is a machine account
+      if (Test-MachineAccount $subject) { break }
+
+      # Always report as Critical
+      $sev = 'Critical'
+      $desc = "DSRM password was changed on Domain Controller `"$account`" by `"$subject`" - this is a critical compromise indicator."
+      $ent = "$account|$subject"
+      if (-not (Should-Dedupe 'dsrm_password_set' $ent $sev $desc)) {
+        return New-Alert 'dsrm_password_set' $desc $sev $f (Get-DedupeKey 'dsrm_password_set' $ent) $evtTime
+      }
+    }
+
     5136 {
-      # 5136: Directory Service Changes - detect GPO modifications, AdminSDHolder
+      # 5136: Directory Service Changes...
       # changes, and sIDHistory abuse. Key fields: ObjectClass, ObjectType (GUID),
       # AttributeLDAPDisplayName, AttributeValue.
       $objClass = "$($f.objectClass)"
