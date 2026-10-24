@@ -307,6 +307,7 @@ $RuleAudit = @{
   computer_account_abuse      = @{ Sub = @('Computer Account Management'); Need = 'Success' }
   suspicious_process_creation = @{ Sub = @('Process Creation'); Need = 'Success' }
   powershell_scriptblock      = @{ Sub = @('PowerShell Script Block Logging'); Need = 'Success' }
+  dsrm_password_set           = @{ Sub = @('User Account Management'); Need = 'Success' }
 }
 
 $SuspiciousServicePath = 'powershell|pwsh|cmd\.exe|wmic|mshta|rundll32|regsvr32|certutil|bitsadmin|net\.exe|-enc\b|/c\s|\\temp\\|\\users\\public\\|\\appdata\\|\\programdata\\|\\windows\\tasks'
@@ -579,6 +580,13 @@ $RuleMeta = @{
     Mitre = 'T1059.001 - Command and Scripting Interpreter: PowerShell / T1059.003 - Windows Command Shell'; Category = 'Execution'
     Description = 'A PowerShell script block was logged containing offensive strings: Invoke-Mimikatz, DumpCreds, Invoke-Kerberoast, FromBase64String+IEX, AmsiUtils, Invoke-Obfuscation, Invoke-Expression with obfuscated payloads, or known malicious patterns. Requires PowerShell Script Block Logging (Module Logging) enabled. Stored script text is truncated for safety.'
     Remediation = 'Review the full script block in the event log. Check if the host/user is compromised. Ensure Script Block Logging is enabled via GPO: Computer Configuration -> Administrative Templates -> Windows Components -> Windows PowerShell -> Turn on PowerShell Script Block Logging.'
+  }
+  dsrm_password_set = @{
+    Severity = 'Critical'; Title = 'DSRM Password Set'
+    EventId = '4794'; EventIds = @('4794'); DedupeMinutes = 60
+    Mitre = 'T1003.006 - OS Credential Dumping: DCSync / T1556.002 - Modify Authentication Process: Password Filter'; Category = 'Credential Access'
+    Description = 'The Directory Services Restore Mode (DSRM) password was set on a Domain Controller. This is a critical indicator of compromise - attackers set a known DSRM password to later boot into DSRM and extract the NTDS.dit database.'
+    Remediation = 'Immediately investigate who changed the DSRM password. If unauthorized, reset the DSRM password from a known-good backup, and rotate KRBTGT twice. Review for signs of DCSync or NTDS.dit extraction.'
   }
 }
 
@@ -2264,6 +2272,11 @@ function Get-NormalizedEvent($e) {
       $f.processId       = Get-Field $xml "ProcessId"
       $f.hostname        = Get-Field $xml "Computer"
       $f.contextInfo     = Get-Field $xml "ContextInfo"
+    }
+    4794 {
+      $f.accountName     = Get-Field $xml "TargetUserName"
+      $f.subjectUserName = Get-Field $xml "SubjectUserName"
+      $f.targetUserSid   = Get-Field $xml "TargetUserSid"
     }
     { $_ -in 4768, 4769 } {
       $f.accountName    = Get-Field $xml "TargetUserName"
@@ -5485,7 +5498,7 @@ $LogSources = @(
   @{ Log = 'Security'; Ids = @(
       4624, 4625, 4648, 4657, 4662, 4672, 4688, 4697, 4698, 4719, 4720, 4722, 4724,
       4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4768,
-      4769, 4771, 4776, 4946, 4947, 4948, 4949, 4950, 5136, 5141, 1100, 1102, 4616
+      4769, 4771, 4776, 4794, 4946, 4947, 4948, 4949, 4950, 5136, 5141, 1100, 1102, 4616
     )
   }
   @{ Log = 'System'; Ids = @(7045) }
