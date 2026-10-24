@@ -303,6 +303,7 @@ $RuleAudit = @{
   firewall_rule_modified      = @{ Sub = @('MPSSVC Rule-Level Policy Change'); Need = 'Success' }
   system_time_changed         = @{ Sub = @('Security State Change'); Need = 'Success' }
   special_privileges_assigned = @{ Sub = @('Special Logon'); Need = 'Success' }
+  gpo_or_admin_object_modified = @{ Sub = @('Directory Service Changes'); Need = 'Success' }
 }
 
 $SuspiciousServicePath = 'powershell|pwsh|cmd\.exe|wmic|mshta|rundll32|regsvr32|certutil|bitsadmin|net\.exe|-enc\b|/c\s|\\temp\\|\\users\\public\\|\\appdata\\|\\programdata\\|\\windows\\tasks'
@@ -547,6 +548,13 @@ $RuleMeta = @{
     Mitre = 'T1078 - Valid Accounts'; Category = 'Privilege Escalation'
     Description = 'A logon was granted administrator-equivalent privileges (SeDebugPrivilege and friends). Expected for real administrators - valuable as a baseline of who holds effective admin rights.'
     Remediation = 'Use this as an inventory of administrative sessions: compare against the list of people who should hold admin rights and remove standing access where it is not needed.'
+  }
+  gpo_or_admin_object_modified = @{
+    Severity = 'High'; Title = 'GPO or AdminSDHolder Object Modified'
+    EventId = '5136'; EventIds = @('5136'); DedupeMinutes = 30
+    Mitre = 'T1484 - Group Policy Modification / T1098 - Account Manipulation'; Category = 'Persistence'
+    Description = 'A change was made to a Group Policy object (groupPolicyContainer), a GPO link (gPLink), the AdminSDHolder nTSecurityDescriptor, or an account\'s sIDHistory attribute. sIDHistory or AdminSDHolder changes are Critical; GPO/GPO link changes are High. Machine accounts are excluded.'
+    Remediation = 'Verify the change was authorized. For sIDHistory: this is a Golden Ticket indicator - rotate KRBTGT twice. For AdminSDHolder: check for backdoor ACLs. For GPO: check for malicious scripts/startup commands.'
   }
 }
 
@@ -2478,6 +2486,43 @@ function Evaluate-Event($e) {
       $account = "$($f.accountName)"
       if (-not (Should-Dedupe 'account_deleted' $account)) {
         return New-Alert 'account_deleted' "Account `"$account`" was deleted by `"$($f.subjectUserName)`"." $null $f (Get-DedupeKey 'account_deleted' $account) $evtTime
+      }
+    }
+
+    5136 {
+      # 5136: Directory Service Changes - detect GPO modifications, AdminSDHolder
+      # changes, and sIDHistory abuse. Key fields: ObjectClass, ObjectType (GUID),
+      # AttributeLDAPDisplayName, AttributeValue.
+      $objClass = "$($f.objectClass)"
+      $attrName = "$($f.attributeLDAPDisplayName)"
+      $attrValue = "$($f.attributeValue)"
+      $subject = "$($f.subjectUserName)"
+      $account = "$($f.accountName)"
+
+      # Skip machine accounts
+      if (Test-MachineAccount $subject -or Test-MachineAccount $account) { break }
+
+      $isCritical = $false
+      $desc = ""
+
+      if ($objClass -ieq 'groupPolicyContainer') {
+        $desc = "Group Policy Object `"$($f.objectName)`" was modified by `"$subject`" (attribute: $attrName)."
+      } elseif ($attrName -ieq 'gPLink') {
+        $desc = "GPO link on `"$($f.objectName)`" was changed by `"$subject`" - potential GPO-based persistence or privilege escalation."
+      } elseif ($attrName -ieq 'nTSecurityDescriptor' -and $f.objectName -match 'AdminSDHolder') {
+        $isCritical = $true
+        $desc = "AdminSDHolder nTSecurityDescriptor was modified by `"$subject`" - this controls the default security descriptor for all protected admin groups (SDProp). Backdoor ACLs may have been added."
+      } elseif ($attrName -ieq 'sIDHistory') {
+        $isCritical = $true
+        $desc = "sIDHistory was modified on account `"$account`" by `"$subject`" - this is a Golden Ticket / SID History injection indicator."
+      } else {
+        break
+      }
+
+      $sev = if ($isCritical) { 'Critical' } else { 'High' }
+      $ent = "$account|$attrName"
+      if (-not (Should-Dedupe 'gpo_or_admin_object_modified' $ent $sev $desc)) {
+        return New-Alert 'gpo_or_admin_object_modified' $desc $sev $f (Get-DedupeKey 'gpo_or_admin_object_modified' $ent) $evtTime
       }
     }
 
@@ -5257,7 +5302,7 @@ $LogSources = @(
   @{ Log = 'Security'; Ids = @(
       4624, 4625, 4648, 4657, 4662, 4672, 4697, 4698, 4719, 4720, 4722, 4724,
       4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4756, 4768, 4769, 4771,
-      4776, 4946, 4947, 4948, 4949, 4950, 5141, 1100, 1102, 4616
+      4776, 4946, 4947, 4948, 4949, 4950, 5136, 5141, 1100, 1102, 4616
     )
   }
   @{ Log = 'System'; Ids = @(7045) }
