@@ -5221,6 +5221,10 @@ function New-SelfTestProbes {
   $probes += @{ ruleKey = 'anonymous_smb_session'; id = 4624; fields = @{ TargetUserName = 'ANONYMOUS LOGON'; TargetUserSid = 'S-1-5-7'; LogonType = '3'; IpAddress = '127.0.0.99' } }
   $probes += @{ ruleKey = 'system_time_changed'; id = 4616; fields = @{ SubjectUserName = 'administrator'; NewTime = '2026-01-01T00:00:00.000Z' } }
   $probes += @{ ruleKey = 'special_privileges_assigned'; id = 4672; fields = @{ SubjectUserName = 'administrator'; PrivilegeList = 'SeSecurityPrivilege SeShutdownPrivilege SeChangeNotifyPrivilege' } }
+  $probes += @{ ruleKey = 'gpo_or_admin_object_modified'; id = 5136; fields = @{ SubjectUserName = 'administrator'; ObjectClass = 'groupPolicyContainer'; ObjectName = 'CN={31B2F340-016D-11D2-945F-00C04FB984F9},CN=Policies,CN=System,DC=selftest,DC=local'; AttributeLDAPDisplayName = 'displayName'; AttributeValue = 'Modified GPO' } }
+  $probes += @{ ruleKey = 'gpo_or_admin_object_modified'; id = 5136; fields = @{ SubjectUserName = 'administrator'; ObjectClass = 'domainDNS'; ObjectName = 'CN=Domain Controllers,DC=selftest,DC=local'; AttributeLDAPDisplayName = 'gPLink'; AttributeValue = '[LDAP://CN={31B2F340-016D-11D2-945F-00C04FB984F9},CN=Policies,CN=System,DC=selftest,DC=local]' } }
+  $probes += @{ ruleKey = 'gpo_or_admin_object_modified'; id = 5136; fields = @{ SubjectUserName = 'administrator'; ObjectClass = 'container'; ObjectName = 'CN=AdminSDHolder,CN=System,DC=selftest,DC=local'; AttributeLDAPDisplayName = 'nTSecurityDescriptor'; AttributeValue = 'O:DAG:DAD:...' } }
+  $probes += @{ ruleKey = 'gpo_or_admin_object_modified'; id = 5136; fields = @{ SubjectUserName = 'administrator'; ObjectClass = 'user'; ObjectName = 'CN=svc-target,CN=Users,DC=selftest,DC=local'; AttributeLDAPDisplayName = 'sIDHistory'; AttributeValue = 'S-1-5-21-1234567890-1234567890-1234567890-500' } }
 
   return $probes
 }
