@@ -11,6 +11,14 @@ $scriptFile = Join-Path $scriptDir 'AlphaSentinel.ps1'
 $usersFile = Join-Path $scriptDir 'sentinel-users.json'
 $adminBackup = Join-Path $scriptDir 'sentinel-audit-backup-*.csv'
 
+# Read the real version from AlphaSentinel.ps1
+$alphaRaw = Get-Content -Raw $scriptFile
+if ($alphaRaw -match '\$Script:SentinelVersion\s*=\s*''([^'']+)''') {
+    $sentinelVersion = $matches[1]
+} else {
+    $sentinelVersion = '2.6.0'
+}
+
 # Check if this is first run (no users file)
 if (-not (Test-Path $usersFile)) {
     Write-Host "==========================================" -ForegroundColor Cyan
@@ -20,72 +28,63 @@ if (-not (Test-Path $usersFile)) {
     Write-Host "This is your first time running Alpha Sentinel."
     Write-Host "We need to create an administrator account."
     Write-Host ""
-    
+
     # Prompt for username
     $adminName = Read-Host -Prompt "Enter administrator username (3-32 chars, A-Z a-z 0-9 . _ -)"
-    
+
     # Validate username format
     if ($adminName -notmatch '^[A-Za-z0-9._-]{3,32}$') {
         Write-Host "Invalid username format. Must be 3-32 characters of A-Z, a-z, 0-9, dot, underscore, or hyphen." -ForegroundColor Red
         exit 1
     }
-    
+
     # Prompt for password (twice)
     $adminPass1 = Read-Host -AsSecureString -Prompt "Enter administrator password (minimum 12 characters)"
     $adminPass2 = Read-Host -AsSecureString -Prompt "Confirm administrator password"
-    
+
     # Compare passwords using SecureString-to-plain conversion
     function Convert-SSToPlain {
         param([System.Security.SecureString]$ss)
         if (-not $ss) { return '' }
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss)
-        return [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        try {
+            return [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        } finally {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
     }
-    
+
     $p1 = Convert-SSToPlain $adminPass1
     $p2 = Convert-SSToPlain $adminPass2
-    
+
+    # Zero the SecureStrings
+    $adminPass1.Dispose()
+    $adminPass2.Dispose()
+
     if ($p1 -ne $p2) {
         Write-Host "Passwords do not match." -ForegroundColor Red
         exit 1
     }
-    
+
     if ($p1.Length -lt 12) {
         Write-Host "Password must be at least 12 characters long." -ForegroundColor Red
         exit 1
     }
-    
-    # Create the users file with PBKDF2 hash
-    $iterations = 150000
-    $salt = New-Object byte[] 16
-    [System.Security.Cryptography.RandomNumberGenerator]::GetBytes($salt) | Out-Null
-    $kdf = New-Object System.Security.Cryptography.Rfc2898DeriveBytes -ArgumentList @($p1, $salt, $iterations)
-    $hashBytes = $kdf.GetBytes(32)
-    $kdf.Dispose()
-    $saltHex = ($salt | ForEach-Object { $_.ToString('x2') }) -join ''
-    $hashHex = ($hashBytes | ForEach-Object { $_.ToString('x2') }) -join ''
-    $now = (Get-Date).ToUniversalTime().ToString("o")
-    $usersJson = @{
-        version = 1
-        users = @(
-            @{
-                user = $adminName
-                salt = $saltHex
-                hash = $hashHex
-                iterations = $iterations
-                created = $now
-                updated = $now
-                avatarColor = ''
-                avatarInitials = ''
-            }
-        )
-    } | ConvertTo-Json -Depth 5
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    [System.IO.File]::WriteAllText($usersFile, $usersJson, $utf8Bom)
-    Write-Host ""
-    Write-Host "Administrator account created successfully!" -ForegroundColor Green
-    Write-Host "Username: $adminName" -ForegroundColor DarkGray
-    Write-Host "Password: [saved securely]" -ForegroundColor DarkGray
+
+    # Delegate account creation to New-SentinelAdmin.ps1 so the hash format can never drift
+    $adminScript = Join-Path $scriptDir 'New-SentinelAdmin.ps1'
+    $result = & $adminScript -Username $adminName -PromptPassword -UsersFile $usersFile -Password $p1 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Failed to create administrator account:" -ForegroundColor Red
+        Write-Host $result -ForegroundColor Red
+        exit 1
+    }
+
+    # Zero the plaintext password strings
+    $p1 = $null
+    $p2 = $null
+    [GC]::Collect()
+
     Write-Host ""
     Write-Host "The main monitor will now start..." -ForegroundColor Cyan
     Write-Host ""
@@ -96,12 +95,22 @@ if (-not (Test-Path $usersFile)) {
 }
 
 # Now launch the main monitor
-Write-Host "Launching Alpha Sentinel v2.5.0 monitor..." -ForegroundColor White
-Write-Host "================================================" -ForegroundColor White
+Write-Host "Launching Alpha Sentinel v$sentinelVersion monitor..." -ForegroundColor White
+Write-Host "=================================================" -ForegroundColor White
 
 # Launch the main script - use -NoProfile to avoid loading user profiles
-# and -ExecutionPolicy Bypass
-$process = Start-Process -FilePath 'powershell.exe' -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptFile -PassThru -WindowStyle Hidden
+# and -ExecutionPolicy Bypass. Forward all user args via @args.
+$process = Start-Process -FilePath 'powershell.exe' -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptFile, @args -PassThru -WindowStyle Hidden
 
 Write-Host "Alpha Sentinel process started with PID: $($process.Id)" -ForegroundColor DarkGray
 Write-Host "Check the process is running: Get-Process -Id $process.Id" -ForegroundColor DarkGray
+
+# Print dashboard URL
+$bind = 'localhost'
+$port = 8443
+foreach ($arg in @args) {
+    if ($arg -eq '-Bind') { $bind = @args[@args.IndexOf($arg) + 1] }
+    if ($arg -eq '-Port') { $port = [int]@args[@args.IndexOf($arg) + 1] }
+}
+$dispBind = if ($bind -eq '0.0.0.0' -or $bind -eq '+' -or $bind -eq '*') { '0.0.0.0' } else { 'localhost' }
+Write-Host "Dashboard: http://$dispBind:$port" -ForegroundColor Cyan
