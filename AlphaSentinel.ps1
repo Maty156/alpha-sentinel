@@ -553,7 +553,7 @@ $RuleMeta = @{
     Severity = 'High'; Title = 'GPO or AdminSDHolder Object Modified'
     EventId = '5136'; EventIds = @('5136'); DedupeMinutes = 30
     Mitre = 'T1484 - Group Policy Modification / T1098 - Account Manipulation'; Category = 'Persistence'
-    Description = 'A change was made to a Group Policy object (groupPolicyContainer), a GPO link (gPLink), the AdminSDHolder nTSecurityDescriptor, or an account\'s sIDHistory attribute. sIDHistory or AdminSDHolder changes are Critical; GPO/GPO link changes are High. Machine accounts are excluded.'
+    Description = 'A change was made to a Group Policy object (groupPolicyContainer), a GPO link (gPLink), the AdminSDHolder nTSecurityDescriptor, or an account''s sIDHistory attribute. sIDHistory or AdminSDHolder changes are Critical; GPO/GPO link changes are High. Machine accounts are excluded.'
     Remediation = 'Verify the change was authorized. For sIDHistory: this is a Golden Ticket indicator - rotate KRBTGT twice. For AdminSDHolder: check for backdoor ACLs. For GPO: check for malicious scripts/startup commands.'
   }
 }
