@@ -140,7 +140,10 @@ param(
   [switch]$EnableAudit,
   # Restore an audit-policy backup written by -EnableAudit
   # (auditpol /restore /file:<that file>).
-  [string]$RestoreAudit = ""
+  [string]$RestoreAudit = "",
+  # Skip all interactive prompts (first-run setup, audit policy prompt).
+  # Useful for CI/CD or non-interactive environments.
+  [switch]$Unattended
 )
 
 if (-not $HistoryFile -and $PSScriptRoot) {
@@ -156,6 +159,14 @@ if (-not $AuthFile) {
   $AuthFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-auth.csv" } else { "sentinel-auth.csv" }
 }
 $PidFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel.pid" } else { "sentinel.pid" }
+
+# ---- VERSION CHECK ----
+# Require Windows PowerShell 5.1 or later
+if ($PSVersionTable.PSVersion.Major -lt 5 -or ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
+  Write-Host "ERROR: Alpha Sentinel requires Windows PowerShell 5.1 or later." -ForegroundColor Red
+  Write-Host "Current version: $($PSVersionTable.PSVersion)" -ForegroundColor Red
+  exit 1
+}
 
 # ------------------------------------------------------------
 # STOP HELPER (defined early so it exists even in a -ReplayPath run)
@@ -3914,9 +3925,141 @@ function Test-HostAllowed($ctx) {
   } catch { return $false }
 }
 
-# ============================================================
+# ---- BOT HELPER FUNCTIONS ----
+# Rule-based bot answer (extracted from existing logic for reuse with Gemini fallback)
+function Get-RuleBasedBotAnswer([string]$Question) {
+    $alerts = $Script:Alerts
+    $rules = @(Get-RuleCatalog)
+
+    $answer = ''
+    $activeCount = @($alerts | Where-Object { -not $_.SelfTest -and ($_.Status -eq 'New' -or $_.Status -eq 'Investigating' -or -not $_.Status) }).Count
+    $criticalCount = @($alerts | Where-Object { -not $_.SelfTest -and $_.Severity -eq 'Critical' }).Count
+    $highCount = @($alerts | Where-Object { -not $_.SelfTest -and $_.Severity -eq 'High' }).Count
+
+    # Question keywords
+    $q = $Question.ToLower()
+    if ($q -match 'critical|high|medium|low') {
+        $answer += "Active alerts: $activeCount total ($criticalCount critical, $highCount high).`n"
+    }
+    if ($q -match 'rules|family|blind|unverified') {
+        $ruleCount = $rules.Count
+        $blindCount = @($rules | Where-Object { $_.auditState -eq 'blind' }).Count
+        $unknownCount = @($rules | Where-Object { $_.auditState -eq 'unknown' }).Count
+        $answer += "Detection coverage: $ruleCount families ($blindCount blind, $unknownCount unverified)`n"
+    }
+    if ($q -match 'chain|attack path') {
+        $answer += "Attack chains are built from alerts sharing an account or source IP within a 60-minute window.`n"
+    }
+    if ($q -match 'kerberoast|as-rep|dcsync') {
+        $answer += "Key AD attack rules: Kerberoasting (Medium/High), AS-REP Roasting (High/Critical), DCSync (Critical). All require specific audit policy subcategories to be enabled.`n"
+    }
+    if ($q -match 'login|brute|spray') {
+        $answer += "Credential detection: password spraying, brute-force single account, NTLM auth failures, kerberos preauth spraying. All deduplicated per entity.`n"
+    }
+    if ($q -match 'persistence|registry|scheduled') {
+        $answer += "Persistence detection: scheduled tasks, registry Run keys, service creation/modification.`n"
+    }
+    if ($q -match 'evasion|log|audit|defender|firewall') {
+        $answer += "Defense evasion: log tampering, audit policy changes, event log service stops, Defender disabled, firewall profile disabled.`n"
+    }
+    if ($q -match 'account|create|delete|enable|disable') {
+        $answer += "Account monitoring: creation, deletion, enable/disable, group membership changes, password resets by admin.`n"
+    }
+    if ($answer -eq '') {
+        $answer = "I'm Wolf, your AD sentinel assistant. I can tell you about active alerts, detection coverage, rule status, and attack chains. Try asking: 'how many critical alerts?', 'what's blind?', 'show attack chains', or 'what is kerberoasting?'"
+    }
+    return $answer
+}
+
+# Gemini AI bot answer (enhances rule-based answer with AI when key is configured)
+function Get-GeminiBotAnswer([string]$Question) {
+    $alerts = $Script:Alerts
+    $rules = @(Get-RuleCatalog)
+    $chains = @(Get-AttackChains)
+
+    # Build compact JSON summary of current state
+    $activeAlerts = @($alerts | Where-Object { -not $_.SelfTest -and ($_.Status -eq 'New' -or $_.Status -eq 'Investigating' -or -not $_.Status) })
+    $severityCounts = @{}
+    foreach ($a in $activeAlerts) {
+        $sev = "$($a.Severity)"
+        if (-not $severityCounts.ContainsKey($sev)) { $severityCounts[$sev] = 0 }
+        $severityCounts[$sev]++
+    }
+    $recentAlerts = @($activeAlerts | Sort-Object { [DateTime]$_.Time } -Descending | Select-Object -First 5 | ForEach-Object {
+        @{
+            title = $_.Title
+            severity = $_.Severity
+            host = $_.Host
+            account = $_.Account
+            time = $_.Time
+        }
+    })
+
+    $ruleCount = $rules.Count
+    $blindCount = @($rules | Where-Object { $_.auditState -eq 'blind' }).Count
+    $unknownCount = @($rules | Where-Object { $_.auditState -eq 'unknown' }).Count
+    $coverage = if ($ruleCount -gt 0) { [int][Math]::Round((100.0 * ($ruleCount - $blindCount - $unknownCount)) / $ruleCount) } else { 0 }
+
+    $stateSummary = @{
+        alertCounts = $severityCounts
+        recentAlerts = $recentAlerts
+        ruleCoverage = @{
+            total = $ruleCount
+            blind = $blindCount
+            unverified = $unknownCount
+            percent = $coverage
+        }
+        chainCount = $chains.Count
+    }
+
+    $geminiKeyFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }
+    $geminiKey = Get-Content -Raw (if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }) -ErrorAction SilentlyContinue
+    if (-not $geminiKey) { return $null }
+
+    $prompt = @"
+You are Wolf, the Alpha Sentinel AI assistant for Active Directory security monitoring.
+You answer questions about this dashboard's alerts, detection coverage, rules, and attack chains.
+Use ONLY the data provided below. Do not invent AD facts not present in this data.
+If you cannot answer from the data, say you don't know.
+
+CURRENT STATE:
+$($stateSummary | ConvertTo-Json -Depth 5)
+
+USER QUESTION: $Question
+
+Answer concisely as Wolf, the AD security assistant. Focus on actionable insights from the data.
+"@
+
+    try {
+        $body = @{
+            contents = @(
+                @{
+                    parts = @(
+                        @{ text = $prompt }
+                    )
+                }
+            )
+            generationConfig = @{
+                temperature = 0.3
+                maxOutputTokens = 500
+            }
+        }
+        $json = $body | ConvertTo-Json -Depth 10
+        $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$geminiKey"
+        $response = Invoke-RestMethod -Uri $url -Method Post -Body $json -ContentType "application/json" -TimeoutSec 8
+        if ($response.candidates -and $response.candidates[0].content.parts[0].text) {
+            return $response.candidates[0].content.parts[0].text.Trim()
+        }
+    } catch {
+        # Log failure server-side only
+        Write-Host "  [bot] Gemini API error: $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
+    return $null
+}
+
+# ============================================================================
 # EMBEDDED WEB SERVER (dashboard + JSON API) - HttpListener, no deps
-# ============================================================
+# ============================================================================
 $Script:DashboardDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 
 function Send-Bytes($res, $bytes, $contentType, $status = 200) {
@@ -4230,71 +4373,39 @@ function Invoke-Handler($ctx) {
         Send-Json $res (@{ ok = $true; user = $userName; sessionHours = $Script:SessionHours; idleMinutes = $Script:IdleMinutes } | ConvertTo-Json)
       }
             '^/api/bot/ask$' {
-              # The bot accepts POST JSON {question: "..."} from the floating panel.
-              # It requires a live session (same-origin gate).
-              if ($method -ne 'POST') { Send-Json $res '{"error":"POST only."}' 405; return }
-              if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin refused."}' 403; return }
-              $body = $bodyParsed
-              if (-not $body -or -not $body.question) { Send-Json $res '{"error":"Missing question."}' 400; return }
-              $ip = $clientIp
-              # brute-force gate per IP
-              if (-not (Test-LoginAllowed $ip)) {
-                $retry = Get-LoginRetryAfter $ip
-                try { $res.Headers.Add('Retry-After', "$retry") } catch { }
-                Write-AuthEvent $ip '' 'blocked' "rate limited, $retry s remaining"
-                Send-Json $res '{"error":"Too many attempts from this address. Try again in a few minutes."}' 429
-                return
-              }
-              # Build a concise answer from the dashboard's own API data
-              # Use the in-memory alert list + rule catalog that the poller already maintains
-              $alerts = $Script:Alerts
-              $rules = @(Get-RuleCatalog)
-
-              # Very simple rule-free answer engine:
-              # 1) if there are active alerts, mention count + severity
-              # 2) if we can read coverage data, mention blind/unverified
-              # 3) fallback to general bot greeting
-
-              $answer = ''
-              $activeCount = @($alerts | Where-Object { -not $_.SelfTest -and ($_.Status -eq 'New' -or $_.Status -eq 'Investigating' -or -not $_.Status) }).Count
-              $criticalCount = @($alerts | Where-Object { -not $_.SelfTest -and $_.Severity -eq 'Critical' }).Count
-              $highCount = @($alerts | Where-Object { -not $_.SelfTest -and $_.Severity -eq 'High' }).Count
-
-              # Question keywords
-              $q = "$($body.question)".ToLower()
-              if ($q -match 'critical|high|medium|low') {
-                $answer += "Active alerts: $activeCount total ($criticalCount critical, $highCount high).`n"
-              }
-              if ($q -match 'rules|family|blind|unverified') {
-                $ruleCount = $rules.Count
-                $blindCount = @($rules | Where-Object { $_.auditState -eq 'blind' }).Count
-                $unknownCount = @($rules | Where-Object { $_.auditState -eq 'unknown' }).Count
-                $answer += "Detection coverage: $ruleCount families ($blindCount blind, $unknownCount unverified)`n"
-              }
-              if ($q -match 'chain|attack path') {
-                $answer += "Attack chains are built from alerts sharing an account or source IP within a 60-minute window.`n"
-              }
-              if ($q -match 'kerberoast|as-rep|dcsync') {
-                $answer += "Key AD attack rules: Kerberoasting (Medium/High), AS-REP Roasting (High/Critical), DCSync (Critical). All require specific audit policy subcategories to be enabled.`n"
-              }
-              if ($q -match 'login|brute|spray') {
-                $answer += "Credential detection: password spraying, brute-force single account, NTLM auth failures, kerberos preauth spraying. All deduplicated per entity.`n"
-              }
-              if ($q -match 'persistence|registry|scheduled') {
-                $answer += "Persistence detection: scheduled tasks, registry Run keys, service creation/modification.`n"
-              }
-              if ($q -match 'evasion|log|audit|defender|firewall') {
-                $answer += "Defense evasion: log tampering, audit policy changes, event log service stops, Defender disabled, firewall profile disabled.`n"
-              }
-              if ($q -match 'account|create|delete|enable|disable') {
-                $answer += "Account monitoring: creation, deletion, enable/disable, group membership changes, password resets by admin.`n"
-              }
-              if ($answer -eq '') {
-                $answer = "I'm Wolf, your AD sentinel assistant. I can tell you about active alerts, detection coverage, rule status, and attack chains. Try asking: 'how many critical alerts?', 'what's blind?', 'show attack chains', or 'what is kerberoasting?'"
-              }
-
-              Send-Json $res (@{ ok = $true; answer = $answer } | ConvertTo-Json)
-            }
+                          # The bot accepts POST JSON {question: "..."} from the floating panel.
+                          # It requires a live session (same-origin gate).
+                          if ($method -ne 'POST') { Send-Json $res '{"error":"POST only."}' 405; return }
+                          if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin refused."}' 403; return }
+                          $body = $bodyParsed
+                          if (-not $body -or -not $body.question) { Send-Json $res '{"error":"Missing question."}' 400; return }
+                          $ip = $clientIp
+                          # brute-force gate per IP
+                          if (-not (Test-LoginAllowed $ip)) {
+                            $retry = Get-LoginRetryAfter $ip
+                            try { $res.Headers.Add('Retry-After', "$retry") } catch { }
+                            Write-AuthEvent $ip '' 'blocked' "rate limited, $retry s remaining"
+                            Send-Json $res '{"error":"Too many attempts from this address. Try again in a few minutes."}' 429
+                            return
+                          }
+                          # Get the rule-based answer (existing logic)
+                          $answer = Get-RuleBasedBotAnswer $body.question
+                          # If Gemini key is configured, try to enhance with AI
+                          $geminiKeyFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }
+                          if (Test-Path $geminiKeyFile) {
+                            try {
+                              $geminiKey = Get-Content -Raw $geminiKeyFile -ErrorAction Stop
+                              if ($geminiKey) {
+                                $enhanced = Get-GeminiBotAnswer $body.question
+                                if ($enhanced) { $answer = $enhanced }
+                              }
+                            } catch {
+                              # Log failure server-side only, fall back to rule-based answer
+                              Write-Host "  [bot] Gemini API error: $($_.Exception.Message)" -ForegroundColor DarkYellow
+                            }
+                          }
+                          Send-Json $res (@{ ok = $true; answer = $answer } | ConvertTo-Json)
+                        }
       '^/api/logout$' {
         $sid = Get-SessionIdFromContext $ctx
         $who = Get-SessionUser $ctx
@@ -4420,6 +4531,12 @@ function Invoke-Handler($ctx) {
       '^/api/settings$' {
         if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
         Send-Json $res ((Get-SettingsPayload) | ConvertTo-Json -Depth 6)
+      }
+      '^/api/settings/gemini-key/status$' {
+        if ($method -ne 'GET') { Send-Json $res '{"error":"Method not allowed - this endpoint is read-only (GET)."}' 405; return }
+        $geminiKeyFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }
+        $keySet = (Test-Path $geminiKeyFile)
+        Send-Json $res (@{ keySet = $keySet } | ConvertTo-Json)
       }
       '^/api/alerts$' {
         # No query string -> serve the cached payload (rebuilt only when an
@@ -4957,6 +5074,28 @@ function Invoke-Handler($ctx) {
           fired             = $fired
           error             = $probeError
         } | ConvertTo-Json -Depth 4)
+      }
+      '^/api/settings/gemini-key$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $me = Get-SessionUser $ctx
+        $body = $bodyParsed
+        $apiKey = if ($body -and $null -ne $body.apiKey) { "$($body.apiKey)" } else { '' }
+        if (-not $apiKey) { Send-Json $res '{"error":"API key is required."}' 400; return }
+        $geminiKeyFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }
+        $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+        [System.IO.File]::WriteAllText($geminiKeyFile, $apiKey, $utf8Bom)
+        Write-AuthEvent $clientIp $me 'success' 'Gemini API key updated'
+        Send-Json $res (@{ ok = $true; keySet = $true } | ConvertTo-Json)
+      }
+      '^/api/settings/gemini-key/clear$' {
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $me = Get-SessionUser $ctx
+        $geminiKeyFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }
+        if (Test-Path $geminiKeyFile) { Remove-Item $geminiKeyFile -Force -ErrorAction SilentlyContinue }
+        Write-AuthEvent $clientIp $me 'success' 'Gemini API key cleared'
+        Send-Json $res (@{ ok = $true; keySet = $false } | ConvertTo-Json)
       }
       default {
         Send-Json $res '{"error":"Not found."}' 404
@@ -5561,6 +5700,118 @@ $null = Restore-State
 # so it is not served at all. Monitoring, alerting and forwarding carry on.
 $usersState = Get-UsersFileState
 $listener = $null
+
+# ---- FIRST-RUN INTERACTIVE SETUP ----
+# If sentinel-users.json does not exist, prompt for admin account creation
+# before starting the web server.
+if (-not $usersState.ok) {
+  $isInteractive = [Environment]::UserInteractive -and $null -ne $Host -and $null -ne $Host.UI -and $null -ne $Host.UI.RawUI
+  $canPrompt = $isInteractive -and (-not $Unattended) -and (-not $DemoData)
+  
+  if ($canPrompt) {
+    Write-Host ""
+    Write-Host "  ============================================================" -ForegroundColor Cyan
+    Write-Host "   ALPHA SENTINEL - First Run Setup" -ForegroundColor Cyan
+    Write-Host "  ============================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  No dashboard account exists yet. Set one up now? (Y/n) " -NoNewline -ForegroundColor Yellow
+    $answer = $null
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline -and -not [Console]::KeyAvailable) { Start-Sleep -Milliseconds 150 }
+    if ([Console]::KeyAvailable) { $answer = [Console]::ReadKey($true).Key.ToString() }
+    Write-Host $(if ($answer -eq 'Y') { 'y' } else { 'n' })
+    
+    if ($answer -eq 'Y') {
+      # Prompt for username
+      $username = ""
+      while (-not $username) {
+        Write-Host ""
+        Write-Host "  Username (3-32 chars, A-Z a-z 0-9 . _ -): " -NoNewline -ForegroundColor Yellow
+        $username = Read-Host
+        if ($username -notmatch '^[A-Za-z0-9._-]{3,32}$') {
+          Write-Host "  Invalid username. Must be 3-32 characters: A-Z a-z 0-9 . _ -" -ForegroundColor Red
+          $username = ""
+        }
+      }
+      
+      # Prompt for password (with confirmation)
+      $password = ""
+      $confirm = ""
+      while (-not $password -or $password -ne $confirm) {
+        Write-Host ""
+        $secure = Read-Host -AsSecureString "  Password (min 12 chars, must not equal username)"
+        $confirmSecure = Read-Host -AsSecureString "  Confirm password"
+        $password = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
+        $confirm = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($confirmSecure))
+        
+        if ($password.Length -lt 12) {
+          Write-Host "  Password must be at least 12 characters." -ForegroundColor Red
+          $password = ""
+          continue
+        }
+        if ($password -ceq $username) {
+          Write-Host "  Password must not be identical to the username." -ForegroundColor Red
+          $password = ""
+          continue
+        }
+        if ($password -ne $confirm) {
+          Write-Host "  Passwords do not match. Try again." -ForegroundColor Red
+          $password = ""
+        }
+      }
+      
+      # Ask if domain-joined
+      $domainJoined = $false
+      Write-Host ""
+      Write-Host "  Is this machine domain-joined? (Y/n) " -NoNewline -ForegroundColor Yellow
+      $domainAnswer = $null
+      $deadline = (Get-Date).AddSeconds(30)
+      while ((Get-Date) -lt $deadline -and -not [Console]::KeyAvailable) { Start-Sleep -Milliseconds 150 }
+      if ([Console]::KeyAvailable) { $domainAnswer = [Console]::ReadKey($true).Key.ToString() }
+      Write-Host $(if ($domainAnswer -eq 'Y') { 'y' } else { 'n' })
+      if ($domainAnswer -eq 'Y') { $domainJoined = $true }
+      
+      # Create the account using the EXACT same PBKDF2 function
+      $iterations = 150000
+      $salt = New-PasswordSalt
+      $hash = Get-PasswordHash $password $salt $Script:Pbkdf2Iterations
+      $now = (Get-Date).ToUniversalTime().ToString("o")
+      
+      $record = [PSCustomObject]@{
+        user       = $username
+        salt       = (ConvertTo-Hex $salt)
+        hash       = (ConvertTo-Hex $hash)
+        iterations = $Script:Pbkdf2Iterations
+        created    = $now
+        updated    = $now
+        avatarColor = ''
+        avatarInitials = ''
+        domainJoined = $domainJoined
+      }
+      
+      $store = [PSCustomObject]@{ version = 1; users = @($record) }
+      Save-UserStore $store
+      
+      Write-Host ""
+      Write-Host "  Account '$username' created successfully!" -ForegroundColor Green
+      Write-Host "  Domain-joined: $(if ($domainJoined) { 'Yes' } else { 'No (lab mode)' })" -ForegroundColor DarkGray
+      Write-Host ""
+      
+      # Refresh users state
+      $usersState = Get-UsersFileState
+    } else {
+      Write-Host ""
+      Write-Host "  Setup cancelled. Run with -Unattended or create an account manually with New-SentinelAdmin.ps1" -ForegroundColor Yellow
+    }
+  } else {
+    Write-Host ""
+    Write-Host "  [web] NOT STARTED - $($usersState.message)" -ForegroundColor Red
+    Write-Host "  [web] Run with -Unattended or create an account manually with .\New-SentinelAdmin.ps1" -ForegroundColor Yellow
+    Write-Host "  [web] Monitoring, alerting and forwarding keep running without it." -ForegroundColor Yellow
+  }
+}
+
+$listener = $null
 if ($usersState.ok) {
   $listener = Start-WebServer
 } else {
@@ -5614,7 +5865,7 @@ if (-not $preflight.readable) {
   # ---- opt-in prompt: interactive console + blind rules + no -EnableAudit ----
   if ($EnableAudit) {
     $null = Enable-SentinelAuditPolicy
-  } elseif (-not $Background -and [Environment]::UserInteractive) {
+  } elseif (-not $Background -and [Environment]::UserInteractive -and -not $Unattended) {
     try {
       Write-Host ""
       Write-Host ("  " + $preflight.blindCount + " rules are blind. Enable the required audit policy now? [y/N] ") -NoNewline -ForegroundColor Yellow
