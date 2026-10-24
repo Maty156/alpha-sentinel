@@ -10,6 +10,7 @@
 #   .\New-SentinelAdmin.ps1 -Username maty             # your own username, random password
 #   .\New-SentinelAdmin.ps1 -Username maty -Reset      # new random password for an existing user
 #   .\New-SentinelAdmin.ps1 -Username maty -PromptPassword   # type your own (min 12 chars)
+#   .\New-SentinelAdmin.ps1 -Username maty -Password '...'   # non-interactive (min 12 chars)
 #   .\New-SentinelAdmin.ps1 -List                      # usernames + created date
 #   .\New-SentinelAdmin.ps1 -Username maty -Remove     # delete an account
 #
@@ -30,7 +31,8 @@ param(
   [switch]$Remove,
   [string]$UsersFile = '',
   [int]$Iterations = 150000,
-  [int]$Length = 20
+  [int]$Length = 20,
+  [string]$Password = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -266,7 +268,14 @@ if ($existing -and -not $Reset) {
 
 $generated = $false
 $plain = $null
-if ($PromptPassword) {
+if ($Password) {
+  # Non-interactive mode: password passed via parameter
+  $plain = $Password
+  if ($plain.Length -lt 12) {
+    Write-Host "  password must be at least 12 characters long." -ForegroundColor Red
+    exit 1
+  }
+} elseif ($PromptPassword) {
   $plain = Read-ConfirmedPassword $Username
 } else {
   $plain = New-RandomPassword $Length
