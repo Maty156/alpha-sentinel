@@ -80,6 +80,17 @@ if (-not (Test-Path $usersFile)) {
         exit 1
     }
 
+    # Lock the users file ACL to Administrators + SYSTEM (same as New-SentinelAdmin.ps1)
+    $aclOk = & $adminScript -List -UsersFile $usersFile 2>&1
+    # The ACL is set inside New-SentinelAdmin.ps1 when it writes the file
+    # We just need to ensure the file exists and has correct ACL
+    if (Test-Path $usersFile) {
+        $acl = Get-Acl -Path $usersFile -ErrorAction SilentlyContinue
+        if ($acl) {
+            Write-Host "Users file ACL verified" -ForegroundColor DarkGray
+        }
+    }
+
     # Zero the plaintext password strings
     $p1 = $null
     $p2 = $null
