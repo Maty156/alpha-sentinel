@@ -201,6 +201,90 @@
     ]));
   }
 
+  function geminiKeyCard(view, session) {
+    var form = S.ui.el('form', { class: 'card-form', novalidate: 'novalidate' });
+    var keySet = false;
+  
+    // Check if key is already set
+    S.api.get('/api/settings/gemini-key/status', 'settings-account').then(function (r) {
+      keySet = r && r.keySet === true;
+      renderForm(keySet);
+    }).catch(function () {
+      renderForm(false);
+    });
+
+    function renderForm(hasKey) {
+      // Clear form
+      S.ui.clear(form);
+    
+      var titleText = hasKey ? 'Gemini API Key (Configured)' : 'Gemini API Key';
+      var subtitle = hasKey ? 'A valid key enables AI-powered answers in the Wolf bot assistant.' : 'Add a Gemini API key to enable AI-powered answers in the Wolf bot assistant.';
+    
+      form.appendChild(S.ui.el('div', { class: 'form-row' }, [
+        S.ui.el('div', { class: 'form-label', text: titleText }),
+        S.ui.el('div', { class: 'caption', text: subtitle })
+      ]));
+    
+      if (hasKey) {
+        var clearBtn = S.ui.el('button', { class: 'btn btn-danger', type: 'button', text: 'Clear Key' });
+        clearBtn.addEventListener('click', function () {
+          if (!confirm('Clear the Gemini API key? The bot will fall back to rule-based answers only.')) return;
+          clearBtn.disabled = true;
+          S.api.post('/api/settings/gemini-key/clear', {}, 'settings-account').then(function () {
+            form.parentElement.parentElement.remove();
+            renderForm(false);
+          }).catch(function (err) {
+            alert('Failed to clear key: ' + (err && err.message ? err.message : 'Unknown error'));
+            clearBtn.disabled = false;
+          });
+        });
+        form.appendChild(S.ui.el('div', { class: 'form-actions' }, [clearBtn]));
+      } else {
+        var input = S.ui.el('input', { 
+          class: 'field', 
+          type: 'password', 
+          id: 'geminiKey', 
+          autocomplete: 'new-password',
+          placeholder: 'Enter your Gemini API key'
+        });
+        var rowKey = field('Gemini API Key', input, 'Get a free key at https://aistudio.google.com/apikey. The key is stored server-side only and never sent back to the browser.');
+        var msg = S.ui.el('div', { class: 'form-msg', 'aria-live': 'polite' });
+        var submit = S.ui.el('button', { class: 'btn btn-primary', type: 'submit', text: 'Save Key' });
+      
+        form.appendChild(rowKey);
+        form.appendChild(msg);
+        form.appendChild(S.ui.el('div', { class: 'form-actions' }, [submit]));
+      
+        form.addEventListener('submit', function (ev) {
+          ev.preventDefault();
+          msg.textContent = '';
+          var key = input.value.trim();
+          if (!key) { 
+            msg.textContent = 'API key is required.'; 
+            msg.className = 'form-msg form-msg-bad'; 
+            return; 
+          }
+          submit.disabled = true;
+          S.api.post('/api/settings/gemini-key', { apiKey: key }, 'settings-account').then(function () {
+            msg.textContent = 'Gemini API key saved.';
+            msg.className = 'form-msg form-msg-ok';
+            input.value = '';
+            // Re-render to show the key as set
+            renderForm(true);
+          }).catch(function (err) {
+            msg.textContent = err && err.message ? err.message : 'Could not save the key.';
+            msg.className = 'form-msg form-msg-bad';
+          }).then(function () { submit.disabled = false; });
+        });
+      }
+    }
+  
+    view.appendChild(S.ui.el('div', { class: 'card' }, [
+      S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Wolf Bot AI Assistant' })]),
+      S.ui.el('div', { class: 'card-body' }, [form])
+    ]));
+  }
+
   S.settingsTabs.account = {
     render: function (view) {
       S.ui.clear(view);
@@ -212,6 +296,7 @@
         usernameCard(left, session);
         avatarCard(right, session);
         securityCard(right, session);
+        geminiKeyCard(right, session);
         grid.appendChild(left);
         grid.appendChild(right);
         view.appendChild(grid);
