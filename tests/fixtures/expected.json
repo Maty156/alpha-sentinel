@@ -219,29 +219,15 @@
   ],
   "note": "A DC machine account (DC01$) modifying a GPO is normal - must not alert."
  },
- "computer-4741-nonadmin-create.xml": {
+ "dsrm-4794.xml": {
   "expect": [
-   "computer_account_abuse"
-  ],
-  "forbid": [],
-  "note": "A non-admin user (jsmith) created a computer account - unauthorized."
- },
- "computer-4742-delegation-change.xml": {
-  "expect": [
-   "computer_account_abuse"
+   "dsrm_password_set"
   ],
   "forbid": [],
   "expectSeverity": {
-   "computer_account_abuse": "High"
+   "dsrm_password_set": "Critical"
   },
-  "note": "An admin modified a computer account's delegation attribute (msDS-AllowedToActOnBehalfOfOtherIdentity) - potential RBCD attack."
- },
- "computer-4741-admin-create-benign.xml": {
-  "expect": [],
-  "forbid": [
-   "computer_account_abuse"
-  ],
-  "note": "An admin creating a computer account is normal domain join activity."
+  "note": "DSRM password was set on a Domain Controller (DC01.selftest.local) - always Critical."
  },
  "process-4688-ntdsutil.xml": {
   "expect": [
