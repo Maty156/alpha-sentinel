@@ -1,0 +1,47 @@
+<Events>
+<Event>
+  <System>
+    <Provider Name="Microsoft-Windows-Security-Auditing" Guid="{54849625-5478-4994-A5BA-3E3B0328C30D}" />
+    <EventID>4741</EventID>
+    <Version>0</Version>
+    <Level>0</Level>
+    <Task>13575</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x8020000000000000</Keywords>
+    <TimeCreated SystemTime="2026-01-15T10:05:00.0000000Z" />
+    <EventRecordID>100006</EventRecordID>
+    <Correlation />
+    <Execution ProcessID="528" ThreadID="532" />
+    <Channel>Security</Channel>
+    <Computer>DC01.selftest.local</Computer>
+    <Security />
+  </System>
+  <EventData>
+    <Data Name="SubjectUserSid">S-1-5-21-1234567890-1234567890-1234567890-1104</Data>
+    <Data Name="SubjectUserName">jsmith</Data>
+    <Data Name="SubjectDomainName">SELFTEST</Data>
+    <Data Name="SubjectLogonId">0x12347</Data>
+    <Data Name="TargetUserSid">S-1-5-21-1234567890-1234567890-1234567890-2001</Data>
+    <Data Name="TargetUserName">WKS101$</Data>
+    <Data Name="TargetDomainName">SELFTEST</Data>
+    <Data Name="SamAccountName">WKS101$</Data>
+    <Data Name="DisplayName">WKS101</Data>
+    <Data Name="UserPrincipalName">WKS101$@selftest.local</Data>
+    <Data Name="HomeDirectory"></Data>
+    <Data Name="HomeDrive"></Data>
+    <Data Name="ScriptPath"></Data>
+    <Data Name="ProfilePath"></Data>
+    <Data Name="UserWorkstations"></Data>
+    <Data Name="PasswordLastSet">2026-01-15T10:05:00.0000000Z</Data>
+    <Data Name="AccountExpires">9223372036854775807</Data>
+    <Data Name="PrimaryGroupId">515</Data>
+    <Data Name="AllowedToDelegateTo"></Data>
+    <Data Name="OldUacValue">0x0</Data>
+    <Data Name="NewUacValue">0x1000</Data>
+    <Data Name="UserAccountControl">0x1000</Data>
+    <Data Name="UserParameters"></Data>
+    <Data Name="SidHistory"></Data>
+    <Data Name="LogonHours"></Data>
+  </EventData>
+</Event>
+</Events>

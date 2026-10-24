@@ -218,5 +218,29 @@
    "gpo_or_admin_object_modified"
   ],
   "note": "A DC machine account (DC01$) modifying a GPO is normal - must not alert."
+ },
+ "computer-4741-nonadmin-create.xml": {
+  "expect": [
+   "computer_account_abuse"
+  ],
+  "forbid": [],
+  "note": "A non-admin user (jsmith) created a computer account - unauthorized."
+ },
+ "computer-4742-delegation-change.xml": {
+  "expect": [
+   "computer_account_abuse"
+  ],
+  "forbid": [],
+  "expectSeverity": {
+   "computer_account_abuse": "High"
+  },
+  "note": "An admin modified a computer account's delegation attribute (msDS-AllowedToActOnBehalfOfOtherIdentity) - potential RBCD attack."
+ },
+ "computer-4741-admin-create-benign.xml": {
+  "expect": [],
+  "forbid": [
+   "computer_account_abuse"
+  ],
+  "note": "An admin creating a computer account is normal domain join activity."
  }
 }

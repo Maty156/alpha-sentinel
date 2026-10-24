@@ -304,6 +304,7 @@ $RuleAudit = @{
   system_time_changed         = @{ Sub = @('Security State Change'); Need = 'Success' }
   special_privileges_assigned = @{ Sub = @('Special Logon'); Need = 'Success' }
   gpo_or_admin_object_modified = @{ Sub = @('Directory Service Changes'); Need = 'Success' }
+  computer_account_abuse      = @{ Sub = @('Computer Account Management'); Need = 'Success' }
 }
 
 $SuspiciousServicePath = 'powershell|pwsh|cmd\.exe|wmic|mshta|rundll32|regsvr32|certutil|bitsadmin|net\.exe|-enc\b|/c\s|\\temp\\|\\users\\public\\|\\appdata\\|\\programdata\\|\\windows\\tasks'
@@ -555,6 +556,13 @@ $RuleMeta = @{
     Mitre = 'T1484 - Group Policy Modification / T1098 - Account Manipulation'; Category = 'Persistence'
     Description = 'A change was made to a Group Policy object (groupPolicyContainer), a GPO link (gPLink), the AdminSDHolder nTSecurityDescriptor, or an account''s sIDHistory attribute. sIDHistory or AdminSDHolder changes are Critical; GPO/GPO link changes are High. Machine accounts are excluded.'
     Remediation = 'Verify the change was authorized. For sIDHistory: this is a Golden Ticket indicator - rotate KRBTGT twice. For AdminSDHolder: check for backdoor ACLs. For GPO: check for malicious scripts/startup commands.'
+  }
+  computer_account_abuse = @{
+    Severity = 'Medium'; Title = 'Computer Account Abuse / RBCD'
+    EventId = '4741/4742'; EventIds = @('4741', '4742'); DedupeMinutes = 30
+    Mitre = 'T1136.002 - Create Account: Domain Account / T1134.001 - Token Impersonation'; Category = 'Persistence'
+    Description = 'A computer account was created/modified by a non-administrator, or the delegation attribute (msDS-AllowedToActOnBehalfOfOtherIdentity) was modified - a common technique for Resource-Based Constrained Delegation (RBCD) attacks to hijack services.'
+    Remediation = 'Verify the creation/modification is legitimate. For delegation changes: check if the computer account is now delegated to a rogue principal (RBCD), and revert if unauthorized.'
   }
 }
 
@@ -2216,6 +2224,12 @@ function Get-NormalizedEvent($e) {
       $f.accountName     = Get-Field $xml "TargetUserName"
       $f.subjectUserName = Get-Field $xml "SubjectUserName"
     }
+    { $_ -in 4741, 4742 } {
+      $f.accountName     = Get-Field $xml "TargetUserName"
+      $f.targetUserName  = Get-Field $xml "TargetUserName"
+      $f.subjectUserName = Get-Field $xml "SubjectUserName"
+      $f.properties      = Get-Field $xml "Properties"
+    }
     { $_ -in 4768, 4769 } {
       $f.accountName    = Get-Field $xml "TargetUserName"
       $f.serviceName    = Get-Field $xml "ServiceName"
@@ -2411,6 +2425,35 @@ function Evaluate-Event($e) {
       $distinct = Get-DistinctCount $hits
       if ($distinct -ge 3 -and -not (Should-Dedupe 'account_lockout_storm' $null)) {
         return New-Alert 'account_lockout_storm' "$distinct distinct accounts were locked out within 10 minutes - consistent with password spraying that crossed the lockout threshold." $null $f (Get-DedupeKey 'account_lockout_storm' $null) $evtTime
+      }
+    }
+
+    { $_ -in 4741, 4742 } {
+      # 4741 = computer account created, 4742 = computer account changed
+      # Alert on: non-admin creating computer accounts, or delegation attribute changes
+      $account = "$($f.accountName)"          # the computer account (ends with $)
+      $subject = "$($f.subjectUserName)"      # who performed the action
+      $props   = "$($f.properties)"           # includes delegation attributes
+
+      # Skip if subject is a machine account or system account
+      if (Test-MachineAccount $subject -or Test-SystemAccount $subject) { break }
+
+      $isAdmin = Test-PrivilegedName $subject
+      $isDelegationChange = $props -match 'msDS-AllowedToActOnBehalfOfOtherIdentity'
+
+      if (-not $isAdmin -or $isDelegationChange) {
+        $sev = if ($isDelegationChange) { 'High' } else { 'Medium' }
+        $action = if ($id -eq 4741) { 'created' } else { 'modified' }
+        $desc = "Computer account `"$account`" was $action by `"$subject`"."
+        if ($isDelegationChange) {
+          $desc += " Delegation attribute (msDS-AllowedToActOnBehalfOfOtherIdentity) was modified - potential RBCD attack."
+        } elseif (-not $isAdmin) {
+          $desc += " The creator is not a privileged account - unauthorized computer account creation."
+        }
+        $ent = "$account|$subject"
+        if (-not (Should-Dedupe 'computer_account_abuse' $ent $sev $desc)) {
+          return New-Alert 'computer_account_abuse' $desc $sev $f (Get-DedupeKey 'computer_account_abuse' $ent) $evtTime
+        }
       }
     }
 
@@ -5238,6 +5281,8 @@ function New-SelfTestProbes {
   $probes += @{ ruleKey = 'gpo_or_admin_object_modified'; id = 5136; fields = @{ SubjectUserName = 'administrator'; ObjectClass = 'domainDNS'; ObjectName = 'CN=Domain Controllers,DC=selftest,DC=local'; AttributeLDAPDisplayName = 'gPLink'; AttributeValue = '[LDAP://CN={31B2F340-016D-11D2-945F-00C04FB984F9},CN=Policies,CN=System,DC=selftest,DC=local]' } }
   $probes += @{ ruleKey = 'gpo_or_admin_object_modified'; id = 5136; fields = @{ SubjectUserName = 'administrator'; ObjectClass = 'container'; ObjectName = 'CN=AdminSDHolder,CN=System,DC=selftest,DC=local'; AttributeLDAPDisplayName = 'nTSecurityDescriptor'; AttributeValue = 'O:DAG:DAD:...' } }
   $probes += @{ ruleKey = 'gpo_or_admin_object_modified'; id = 5136; fields = @{ SubjectUserName = 'administrator'; ObjectClass = 'user'; ObjectName = 'CN=svc-target,CN=Users,DC=selftest,DC=local'; AttributeLDAPDisplayName = 'sIDHistory'; AttributeValue = 'S-1-5-21-1234567890-1234567890-1234567890-500' } }
+  $probes += @{ ruleKey = 'computer_account_abuse'; id = 4741; fields = @{ TargetUserName = 'WKS101$'; SubjectUserName = 'jsmith'; Properties = '' } }
+  $probes += @{ ruleKey = 'computer_account_abuse'; id = 4742; fields = @{ TargetUserName = 'SVR01$'; SubjectUserName = 'administrator'; Properties = 'msDS-AllowedToActOnBehalfOfOtherIdentity=<BinaryData>' } }
 
   return $probes
 }
@@ -5318,8 +5363,8 @@ function Forward-ToWeb($alert) {
 $LogSources = @(
   @{ Log = 'Security'; Ids = @(
       4624, 4625, 4648, 4657, 4662, 4672, 4697, 4698, 4719, 4720, 4722, 4724,
-      4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4756, 4768, 4769, 4771,
-      4776, 4946, 4947, 4948, 4949, 4950, 5136, 5141, 1100, 1102, 4616
+      4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4768,
+      4769, 4771, 4776, 4946, 4947, 4948, 4949, 4950, 5136, 5141, 1100, 1102, 4616
     )
   }
   @{ Log = 'System'; Ids = @(7045) }
