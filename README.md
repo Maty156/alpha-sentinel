@@ -1,4 +1,4 @@
-# ALPHA Sentinel v2.2 - AD / Network Attack Monitor (background service + web dashboard)
+# ALPHA SENTINEL v2.6.0 - AD / Network Attack Monitor (background service + web dashboard)
 
 A standalone Windows security-monitoring tool from the **Alpha Cybersecurity**
 graduation project - **Wazuh's agent + dashboard model as ONE zero-dependency
