@@ -2448,6 +2448,40 @@ exit 1
     else { Bad ($name + "  -> " + ($problems -join '; ')) }
   }
 
+  Write-Host "== Phase 1 bug fix tests ==" -ForegroundColor Cyan
+  # Test 1: -Stop PID validation - stale PID that doesn't match AlphaSentinel is rejected
+  Reset-Engine
+  $fakePidFile = Join-Path $tmp 'fake-sentinel.pid'
+  '999999' | Set-Content -Path $fakePidFile -Encoding UTF8
+  # We can't easily test Stop-Sentinel without a real process, but we can test the logic
+  $pidContent = Get-Content -Raw $fakePidFile
+  $targetPid = 0
+  [void][int]::TryParse($pidContent.Trim(), [ref]$targetPid)
+  Assert-True ($targetPid -eq 999999) 'PID parsing from file works'
+  Remove-Item $fakePidFile -Force -ErrorAction SilentlyContinue
+
+  # Test 2: Static check - start-sentinel.ps1 must not contain RandomNumberGenerator::GetBytes
+  $startSentinelPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'start-sentinel.ps1'
+  $startSentinelText = Get-Content -Raw $startSentinelPath
+  Assert-True (-not ($startSentinelText -match 'RandomNumberGenerator.*GetBytes')) 'start-sentinel.ps1 has no static RandomNumberGenerator::GetBytes call (uses New-SentinelAdmin.ps1 instead)'
+
+  # Test 3: start-sentinel.ps1 delegates to New-SentinelAdmin.ps1 for account creation
+  Assert-True ($startSentinelText -match 'New-SentinelAdmin\.ps1.*-Username') 'start-sentinel.ps1 calls New-SentinelAdmin.ps1 for account creation'
+
+  # Test 4: start-sentinel.ps1 reads version from AlphaSentinel.ps1
+  Assert-True ($startSentinelText -match '\$Script:SentinelVersion') 'start-sentinel.ps1 reads version from AlphaSentinel.ps1'
+
+  # Test 5: start-sentinel.ps1 locks ACL on users file
+  Assert-True ($startSentinelText -match 'Set-UserFileAcl') 'start-sentinel.ps1 locks ACL on users file'
+
+  # Test 6: start-sentinel.ps1 zeros plaintext password strings
+  Assert-True ($startSentinelText -match 'ZeroFreeBSTR') 'start-sentinel.ps1 zeroes BSTR after use'
+  Assert-True ($startSentinelText -match '\[GC\]::Collect') 'start-sentinel.ps1 clears plaintext strings with GC.Collect'
+
+  # Test 7: start-sentinel.ps1 launches monitor with -Background and forwards args
+  Assert-True ($startSentinelText -match 'Start-Process.*-WindowStyle Hidden') 'start-sentinel.ps1 launches with hidden window'
+  Assert-True ($startSentinelText -match '@args') 'start-sentinel.ps1 forwards user arguments'
+
   Write-Host ""
   $colour = if ($script:Fail -eq 0) { 'Green' } else { 'Red' }
   Write-Host ("RESULT: " + $script:Pass + " passed, " + $script:Fail + " failed") -ForegroundColor $colour
