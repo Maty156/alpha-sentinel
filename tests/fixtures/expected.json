@@ -284,5 +284,26 @@
    "powershell_scriptblock"
   ],
   "note": "Normal administrative PowerShell command - Get-Service."
+ },
+ "logon-4624-pth-type9.xml": {
+  "expect": [
+   "pass_the_hash_logon"
+  ],
+  "forbid": [],
+  "note": "LogonType 9 (new credentials) with NTLM KeyLength=0 - classic pass-the-hash."
+ },
+ "logon-4624-pth-type3-ntlm.xml": {
+  "expect": [
+   "pass_the_hash_logon"
+  ],
+  "forbid": [],
+  "note": "LogonType 3 with NTLM and KeyLength=0 - pass-the-hash via network logon."
+ },
+ "logon-4624-benign-type3-ntlm.xml": {
+  "expect": [],
+  "forbid": [
+   "pass_the_hash_logon"
+  ],
+  "note": "LogonType 3 with NTLM KeyLength=128 - normal NTLM authentication, not pass-the-hash."
  }
 }

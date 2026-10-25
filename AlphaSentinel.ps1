@@ -308,6 +308,7 @@ $RuleAudit = @{
   suspicious_process_creation = @{ Sub = @('Process Creation'); Need = 'Success' }
   powershell_scriptblock      = @{ Sub = @('PowerShell Script Block Logging'); Need = 'Success' }
   dsrm_password_set           = @{ Sub = @('User Account Management'); Need = 'Success' }
+  pass_the_hash_logon         = @{ Sub = @('Logon'); Need = 'Success' }
 }
 
 $SuspiciousServicePath = 'powershell|pwsh|cmd\.exe|wmic|mshta|rundll32|regsvr32|certutil|bitsadmin|net\.exe|-enc\b|/c\s|\\temp\\|\\users\\public\\|\\appdata\\|\\programdata\\|\\windows\\tasks'
@@ -587,6 +588,13 @@ $RuleMeta = @{
     Mitre = 'T1003.006 - OS Credential Dumping: DCSync / T1556.002 - Modify Authentication Process: Password Filter'; Category = 'Credential Access'
     Description = 'The Directory Services Restore Mode (DSRM) password was set on a Domain Controller. This is a critical indicator of compromise - attackers set a known DSRM password to later boot into DSRM and extract the NTDS.dit database.'
     Remediation = 'Immediately investigate who changed the DSRM password. If unauthorized, reset the DSRM password from a known-good backup, and rotate KRBTGT twice. Review for signs of DCSync or NTDS.dit extraction.'
+  }
+  pass_the_hash_logon = @{
+    Severity = 'Critical'; Title = 'Pass-the-Hash Logon'
+    EventId = '4624'; EventIds = @('4624'); DedupeMinutes = 15
+    Mitre = 'T1550.002 - Use Alternate Authentication Material: Pass the Hash'; Category = 'Credential Access'
+    Description = 'A logon of type 9 (new credentials) or a network logon (type 3) using NTLM with KeyLength=0 from a non-machine account to a non-localhost source - indicates pass-the-hash or pass-the-ticket lateral movement.'
+    Remediation = 'Immediately isolate the source host. Rotate the target account password and KRBTGT. Verify the source is not a legitimate administrative tool. Enable NTLM auditing and restrict NTLM where possible.'
   }
 }
 
@@ -2220,11 +2228,13 @@ function Get-NormalizedEvent($e) {
       $f.workstationName = Get-Field $xml "WorkstationName"
     }
     4624 {
-      $f.accountName     = Get-Field $xml "TargetUserName"
-      $f.sourceIp        = Get-Field $xml "IpAddress"
-      $f.logonType       = Get-Field $xml "LogonType"
-      $f.workstationName = Get-Field $xml "WorkstationName"
-      $f.targetUserSid   = Get-Field $xml "TargetUserSid"
+      $f.accountName             = Get-Field $xml "TargetUserName"
+      $f.sourceIp                = Get-Field $xml "IpAddress"
+      $f.logonType               = Get-Field $xml "LogonType"
+      $f.workstationName         = Get-Field $xml "WorkstationName"
+      $f.targetUserSid           = Get-Field $xml "TargetUserSid"
+      $f.authenticationPackageName = Get-Field $xml "AuthenticationPackageName"
+      $f.keyLength               = Get-Field $xml "KeyLength"
     }
     { $_ -in 4728, 4729, 4732, 4733, 4756 } {
       $f.accountName     = Get-Field $xml "MemberName"
@@ -2829,6 +2839,20 @@ function Evaluate-Event($e) {
           }
         }
       }
+
+      # pass-the-hash: LogonType 9 (new credentials) OR LogonType 3 with NTLM and KeyLength=0
+      # from a non-machine account to a non-localhost source
+      $authPkg = "$($f.authenticationPackageName)"
+      $keyLen  = "$($f.keyLength)"
+      $isPassTheHash = (($type -eq '9') -or ($type -eq '3' -and $authPkg -ieq 'NTLM' -and $keyLen -eq '0'))
+      if ($isPassTheHash -and $account -and -not (Test-MachineAccount $account) -and $srcIp -and $srcIp -ne '-' -and $srcIp -ne '::1' -and $srcIp -ne '127.0.0.1') {
+        $ent = "$account|$srcIp"
+        $desc = 'Pass-the-hash logon (type ' + $type + ') by "' + $account + '" from ' + $srcIp + ' - NTLM KeyLength=0 indicates credential reuse.'
+        if (-not (Should-Dedupe 'pass_the_hash_logon' $ent)) {
+          return New-Alert 'pass_the_hash_logon' $desc $null $f (Get-DedupeKey 'pass_the_hash_logon' $ent) $evtTime
+        }
+      }
+
       $isRdp = ($type -eq '10')
       # Type 3 (network) is how services, backups, SMB and management tooling
       # all log on. Reporting every one of those was the noise this rule caused,
@@ -5417,6 +5441,8 @@ function New-SelfTestProbes {
   $probes += @{ ruleKey = 'audit_policy_changed'; id = 4719; fields = @{ SubjectUserName = 'administrator'; SubcategoryId = 'Logon' } }
   $probes += @{ ruleKey = 'eventlog_service_stopped'; id = 1100; fields = @{ Param1 = 'EventLog' } }
   $probes += @{ ruleKey = 'defender_disabled'; id = 5001; fields = @{ ProductName = 'Windows Defender' } }
+  $probes += @{ ruleKey = 'dsrm_password_set'; id = 4794; fields = @{ TargetUserName = 'Administrator'; SubjectUserName = 'jsmith'; TargetUserSid = 'S-1-5-21-1234567890-1234567890-1234567890-500' } }
+  $probes += @{ ruleKey = 'pass_the_hash_logon'; id = 4624; fields = @{ TargetUserName = 'administrator'; IpAddress = '10.0.0.5'; LogonType = '9'; AuthenticationPackageName = 'NTLM'; KeyLength = '0' } }
 
   $probes += @{ ruleKey = 'firewall_rule_modified'; id = 4946; fields = @{ SubjectUserName = 'administrator'; RuleName = 'Allow RDP inbound' } }
   $probes += @{ ruleKey = 'firewall_disabled'; id = 4950; fields = @{ SubjectUserName = 'administrator'; ProfileChanged = 'Domain'; SettingType = 'EnableFirewall'; SettingValue = 'No' } }
