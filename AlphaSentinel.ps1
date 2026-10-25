@@ -4807,6 +4807,7 @@ function Invoke-Handler($ctx) {
           forwarded           = $Script:Forwarded
           forwardingErrors    = $Script:ForwardFailures
           alertOutputFailures = $Script:AlertOutputFailures
+          alertOutputDropped  = $Script:AlertOutputDropped
           auditBlind          = @(Get-RuleCatalog | Where-Object { $_.auditState -eq 'blind' }).Count
           uptimeSeconds       = $uptime
         } | ConvertTo-Json -Depth 4)
@@ -5541,20 +5542,82 @@ function New-EventShim($p) {
 # ============================================================
 # ALERT OUTPUTS (Webhook, SMTP, Syslog) - off by default
 # ============================================================
+# Every output is protected so a dead server can never freeze the SINGLE-THREADED
+# poll loop / dashboard:
+#   * short timeouts (3 s) on every network call
+#   * a per-output circuit breaker: 3 consecutive failures pause that output
+#     for 60 s, one success resets it
+#   * a per-output rate limit: at most 20 messages per rolling minute
+# Alerts that are skipped by the breaker or the rate limit are still on the
+# dashboard and in the history; they are counted in /api/status as
+# alertOutputDropped.
 $Script:AlertOutputFailures = 0
+$Script:AlertOutputDropped = 0
+$Script:AlertOutputState = $null
+$Script:AlertOutputTimeoutSec = 3
+$Script:AlertOutputMaxPerMinute = 20
+$Script:AlertOutputBreakerFails = 3
+$Script:AlertOutputBreakerSeconds = 60
+
+function Get-AlertOutputState([string]$name) {
+  if (-not $Script:AlertOutputState) { $Script:AlertOutputState = @{} }
+  if (-not $Script:AlertOutputState.ContainsKey($name)) {
+    $Script:AlertOutputState[$name] = @{
+      Fails     = 0
+      OpenUntil = [DateTime]::MinValue
+      Sent      = New-Object System.Collections.ArrayList
+    }
+  }
+  return $Script:AlertOutputState[$name]
+}
+
+# $true when this output may be used right now. Counts a drop when it may not.
+function Test-AlertOutputAllowed([string]$name) {
+  $st = Get-AlertOutputState $name
+  $now = Get-Date
+  if ($now -lt $st.OpenUntil) { $Script:AlertOutputDropped++; return $false }
+  $cut = $now.AddMinutes(-1)
+  for ($i = $st.Sent.Count - 1; $i -ge 0; $i--) {
+    if ($st.Sent[$i] -lt $cut) { $st.Sent.RemoveAt($i) }
+  }
+  if ($st.Sent.Count -ge $Script:AlertOutputMaxPerMinute) { $Script:AlertOutputDropped++; return $false }
+  [void]$st.Sent.Add($now)
+  return $true
+}
+
+function Register-AlertOutputResult([string]$name, [bool]$ok, $err) {
+  $st = Get-AlertOutputState $name
+  if ($ok) { $st.Fails = 0; return }
+  $st.Fails++
+  $Script:AlertOutputFailures++
+  if ($Script:AlertOutputFailures -le 3 -or ($Script:AlertOutputFailures % 25) -eq 0) {
+    Write-Host "  [$name] failed ($($Script:AlertOutputFailures) total): $err" -ForegroundColor DarkYellow
+  }
+  if ($st.Fails -ge $Script:AlertOutputBreakerFails) {
+    $st.OpenUntil = (Get-Date).AddSeconds($Script:AlertOutputBreakerSeconds)
+    $st.Fails = 0
+    Write-Host "  [$name] paused for $($Script:AlertOutputBreakerSeconds) s after repeated failures" -ForegroundColor DarkYellow
+  }
+}
+
+# One line, no control characters: keeps log/mail/syslog injection out.
+function ConvertTo-OneLine($v) {
+  return ("$v" -replace '[\x00-\x1F\x7F]+', ' ').Trim()
+}
+
 function Send-AlertOutput($alert) {
   # Safety: ensure hashtables exist (for test harness compatibility)
   if (-not $Script:RecentAlertTimes) { $Script:RecentAlertTimes = @{} }
-  
+
   # Safety: ensure alert and its properties exist
   if (-not $alert -or -not $alert.RuleKey) { return }
-  
+
   # Respect minimum severity filter
   $sevRank = @{ 'Critical' = 0; 'High' = 1; 'Medium' = 2; 'Low' = 3 }
-  $alertRank = if ($sevRank.ContainsKey($alert.Severity)) { $sevRank[$alert.Severity] } else { 99 }
-  $minRank = if ($sevRank.ContainsKey($AlertMinSeverity)) { $sevRank[$AlertMinSeverity] } else { 1 }
+  $alertRank = if ($sevRank.ContainsKey("$($alert.Severity)")) { $sevRank["$($alert.Severity)"] } else { 99 }
+  $minRank = if ($sevRank.ContainsKey("$AlertMinSeverity")) { $sevRank["$AlertMinSeverity"] } else { 1 }
   if ($alertRank -gt $minRank) { return }
-  
+
   # Dedupe: only send once per rule+entity per 5 minutes
   $entity = if ($alert.Entity -and "$($alert.Entity)") { $alert.Entity } else { "global" }
   $dedupeKey = "output|$($alert.RuleKey)|$entity"
@@ -5563,91 +5626,96 @@ function Send-AlertOutput($alert) {
     return
   }
   $Script:RecentAlertTimes[$dedupeKey] = Get-Date
-  
+
   # Webhook (generic JSON POST)
-  if ($WebhookUrl) {
+  if ($WebhookUrl -and (Test-AlertOutputAllowed 'webhook')) {
+    $ok = $false; $err = ''
     try {
       $body = @{
         isAlert     = $true
-        ruleKey     = $alert.RuleKey
-        severity    = $alert.Severity
-        title       = $alert.Title
-        description = $alert.Description
-        mitre       = $alert.Mitre
-        alertedAt   = $alert.Time
-        host        = $alert.Host
-        account     = $alert.Account
-        sourceIp    = $alert.SourceIp
-        eventId     = $alert.EventId
+        ruleKey     = "$($alert.RuleKey)"
+        severity    = "$($alert.Severity)"
+        title       = "$($alert.Title)"
+        description = "$($alert.Description)"
+        mitre       = "$($alert.Mitre)"
+        alertedAt   = "$($alert.Time)"
+        host        = "$($alert.Host)"
+        account     = "$($alert.Account)"
+        sourceIp    = "$($alert.SourceIp)"
+        eventId     = "$($alert.EventId)"
       }
       $json = $body | ConvertTo-Json -Depth 3
       Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $json -ContentType "application/json" `
-        -TimeoutSec 8 -ErrorAction Stop | Out-Null
-    } catch {
-      $Script:AlertOutputFailures++
-      if ($Script:AlertOutputFailures -le 3) {
-        Write-Host "  [webhook] failed ($($Script:AlertOutputFailures) total): $_" -ForegroundColor DarkYellow
-      }
-    }
+        -TimeoutSec $Script:AlertOutputTimeoutSec -ErrorAction Stop | Out-Null
+      $ok = $true
+    } catch { $err = $_ }
+    Register-AlertOutputResult 'webhook' $ok $err
   }
-  
-  # SMTP (Send-MailMessage or System.Net.Mail)
-  if ($SmtpServer -and $SmtpTo -and $SmtpFrom) {
+
+  # SMTP (System.Net.Mail with a real timeout; "host" or "host:port")
+  if ($SmtpServer -and $SmtpTo -and $SmtpFrom -and (Test-AlertOutputAllowed 'smtp')) {
+    $ok = $false; $err = ''
+    $mail = $null; $client = $null
     try {
-      $subject = "ALPHA Sentinel: $($alert.Severity) - $($alert.Title)"
-      $body = @"
+      $subject = ConvertTo-OneLine "ALPHA Sentinel: $($alert.Severity) - $($alert.Title)"
+      $text = @"
 ALPHA Sentinel Alert
 ====================
-Rule: $($alert.RuleKey)
-Severity: $($alert.Severity)
-Title: $($alert.Title)
-Description: $($alert.Description)
-Host: $($alert.Host)
-Account: $($alert.Account)
-Source IP: $($alert.SourceIp)
-Event ID: $($alert.EventId)
-MITRE: $($alert.Mitre)
-Time: $($alert.Time)
+Rule: $(ConvertTo-OneLine $alert.RuleKey)
+Severity: $(ConvertTo-OneLine $alert.Severity)
+Title: $(ConvertTo-OneLine $alert.Title)
+Description: $(ConvertTo-OneLine $alert.Description)
+Host: $(ConvertTo-OneLine $alert.Host)
+Account: $(ConvertTo-OneLine $alert.Account)
+Source IP: $(ConvertTo-OneLine $alert.SourceIp)
+Event ID: $(ConvertTo-OneLine $alert.EventId)
+MITRE: $(ConvertTo-OneLine $alert.Mitre)
+Time: $(ConvertTo-OneLine $alert.Time)
 "@
-      if ($SmtpServer -match '^smtp\.') {
-        Send-MailMessage -SmtpServer $SmtpServer -To $SmtpTo -From $SmtpFrom `
-          -Subject $subject -Body $body -Priority High -ErrorAction Stop
-      } else {
-        # Use System.Net.Mail for non-standard ports
-        $mail = New-Object System.Net.Mail.MailMessage
-        $mail.From = $SmtpFrom
-        $mail.To.Add($SmtpTo)
-        $mail.Subject = $subject
-        $mail.Body = $body
-        $mail.Priority = [System.Net.Mail.MailPriority]::High
-        $client = New-Object System.Net.Mail.SmtpClient($SmtpServer)
-        $client.Send($mail)
-        $client.Dispose()
-      }
-    } catch {
-      $Script:AlertOutputFailures++
-      if ($Script:AlertOutputFailures -le 3) {
-        Write-Host "  [smtp] failed ($($Script:AlertOutputFailures) total): $_" -ForegroundColor DarkYellow
-      }
+      $smtpHost = $SmtpServer
+      $smtpPort = 25
+      if ($SmtpServer -match '^(.+):(\d{1,5})$') { $smtpHost = $Matches[1]; $smtpPort = [int]$Matches[2] }
+      $mail = New-Object System.Net.Mail.MailMessage
+      $mail.From = New-Object System.Net.Mail.MailAddress($SmtpFrom)
+      $mail.To.Add($SmtpTo)
+      $mail.Subject = $subject
+      $mail.Body = $text
+      $mail.Priority = [System.Net.Mail.MailPriority]::High
+      $client = New-Object System.Net.Mail.SmtpClient($smtpHost, $smtpPort)
+      $client.Timeout = $Script:AlertOutputTimeoutSec * 1000
+      if ($smtpPort -eq 587) { $client.EnableSsl = $true }
+      $client.Send($mail)
+      $ok = $true
+    } catch { $err = $_ }
+    finally {
+      if ($mail) { $mail.Dispose() }
+      if ($client) { $client.Dispose() }
     }
+    Register-AlertOutputResult 'smtp' $ok $err
   }
-  
-  # Syslog (UDP RFC5424)
-  if ($SyslogHost) {
+
+  # Syslog (UDP, RFC 5424). Facility local4 (20); severity follows the alert.
+  if ($SyslogHost -and (Test-AlertOutputAllowed 'syslog')) {
+    $ok = $false; $err = ''
+    $udp = $null
     try {
-      $msg = "<165>1 $(Get-Date -Format u) $(hostname) AlphaSentinel $($alert.RuleKey) $($alert.Id) - "
-      $msg += "severity=$($alert.Severity) title=$($alert.Title) host=$($alert.Host) account=$($alert.Account) sourceIp=$($alert.SourceIp) eventId=$($alert.EventId) mitre=$($alert.Mitre)"
+      $sysSev = switch ("$($alert.Severity)") { 'Critical' { 2 } 'High' { 3 } 'Medium' { 4 } default { 5 } }
+      $pri = 20 * 8 + $sysSev
+      $stamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+      $msg = "<$pri>1 $stamp $([Environment]::MachineName) AlphaSentinel $PID $(ConvertTo-OneLine $alert.RuleKey) - "
+      $msg += "id=$($alert.Id) severity=$(ConvertTo-OneLine $alert.Severity) title=$(ConvertTo-OneLine $alert.Title) "
+      $msg += "host=$(ConvertTo-OneLine $alert.Host) account=$(ConvertTo-OneLine $alert.Account) "
+      $msg += "sourceIp=$(ConvertTo-OneLine $alert.SourceIp) eventId=$(ConvertTo-OneLine $alert.EventId) "
+      $msg += "mitre=$(ConvertTo-OneLine $alert.Mitre)"
       $bytes = [Text.Encoding]::UTF8.GetBytes($msg)
+      if ($bytes.Length -gt 1024) { $bytes = [byte[]]($bytes[0..1023]) }
       $udp = New-Object System.Net.Sockets.UdpClient
       $udp.Connect($SyslogHost, $SyslogPort)
-      $udp.Send($bytes, $bytes.Length) | Out-Null
-      $udp.Close()
-    } catch {
-      $Script:AlertOutputFailures++
-      if ($Script:AlertOutputFailures -le 3) {
-        Write-Host "  [syslog] failed ($($Script:AlertOutputFailures) total): $_" -ForegroundColor DarkYellow
-      }
-    }
+      [void]$udp.Send($bytes, $bytes.Length)
+      $ok = $true
+    } catch { $err = $_ }
+    finally { if ($udp) { $udp.Close() } }
+    Register-AlertOutputResult 'syslog' $ok $err
   }
 }
 
