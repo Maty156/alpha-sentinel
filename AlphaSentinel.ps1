@@ -223,7 +223,7 @@ try {
 } catch { }
 
 # ============================================================
-# DETECTION RULES (30 families)
+# DETECTION RULES (36 families)
 # ============================================================
 # Mirrors alpha/utils/detectionRules.js. Keys must match exactly so an alert
 # promoted in either product lands on the same rule_key.
