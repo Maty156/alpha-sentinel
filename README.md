@@ -20,7 +20,7 @@ separate private repo: `Maty156/alpha`).
 | File | What it is |
 |---|---|
 || `AlphaSentinel.ps1` | **The main tool (v2.6.0)** - background monitor + embedded web dashboard ||
-| `dashboard.html` / `dashboard.js` | The dashboard, served by AlphaSentinel behind a login - must sit beside the script |
+| `dashboard.html` | The dashboard, served by AlphaSentinel behind a login - must sit beside the script |
 | `login.html` / `login.js` | The sign-in page (public) |
 | `New-SentinelAdmin.ps1` | Creates and manages the dashboard accounts in `sentinel-users.json` |
 | `collector.ps1` | Minimal headless collector - polls the logs and forwards normalised events to the web platform, no UI |
@@ -198,7 +198,7 @@ with the page. That is replaced by a real login:
   rather than parking the single web thread - a stalled body is a failed sign-in,
   and three of them from one address block it (`bodyTimeouts` on `/api/status`).
 - Response hardening: `Content-Security-Policy` with **`script-src 'self'`** (no
-  inline script anywhere; `dashboard.js` and `login.js` are separate files),
+  inline script anywhere; `dashboard.html` and `login.html` are served from the `js/` directory, and `dashboard.html`/`login.html` reference separate `js/` files for scripts,
   `X-Frame-Options: DENY`, `nosniff`, `no-store`. No CDN, no outbound calls.
 
 ## Architecture
