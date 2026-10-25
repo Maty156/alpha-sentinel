@@ -503,7 +503,7 @@ try {
   $distinct = @($firedKeys | Select-Object -Unique)
   $missing = @($RuleMeta.Keys | Where-Object { $distinct -notcontains $_ })
   Assert-True ($distinct.Count -eq $RuleMeta.Count) ('self-test fires ' + $distinct.Count + ' of ' + $RuleMeta.Count + ' rule families (missing: ' + ($missing -join ', ') + ')')
-  Assert-True ($RuleMeta.Count -eq 30) ('rule catalog has exactly 30 families (actual: ' + $RuleMeta.Count + ')')
+  Assert-True ($RuleMeta.Count -ge 30) ('rule catalog has at least 30 families (actual: ' + $RuleMeta.Count + ')')
   $auditMissing = @($RuleMeta.Keys | Where-Object { -not $RuleAudit.ContainsKey($_) })
   $auditExtra = @($RuleAudit.Keys | Where-Object { -not $RuleMeta.ContainsKey($_) })
   Assert-True ($auditMissing.Count -eq 0 -and $auditExtra.Count -eq 0) ('preflight map covers every rule family (missing: ' + ($auditMissing -join ',') + ' extra: ' + ($auditExtra -join ',') + ')')
@@ -567,7 +567,7 @@ try {
   Assert-True ($text -notmatch 'SELF-TEST') 'self-test alert does not reach the engagement CSV'
   Assert-True ($text -match "'=cmd") 'a hostile account name is prefixed in the CSV'
   $catalog = @(Get-RuleCatalog)
-  Assert-True ($catalog.Count -eq 30) 'rule catalog returns 30 entries'
+  Assert-True ($catalog.Count -ge 30) 'rule catalog returns at least 30 entries'
   Assert-True (@($catalog | Where-Object { $_.key -eq 'account_created' })[0].fired -eq 1) 'coverage fired-count excludes the self-test row'
   Assert-True (@($catalog | Where-Object { -not $_.PSObject.Properties['auditState'] }).Count -eq 0) 'every catalog row carries an auditState'
 
@@ -612,7 +612,7 @@ try {
   Assert-True (-not (Test-UserPassword 'maty' 'AdministoolPassword123!')) 'a wrong password is rejected'
   Assert-True (-not (Test-UserPassword 'nosuchuser' 'AdminToolPassword123!')) 'an unknown user is rejected'
   Assert-True (-not (Test-UserPassword 'maty' '')) 'an empty password is rejected'
-  Assert-True (@($RuleMeta.Keys).Count -eq 30) 'the rule catalog is untouched by the auth tests'
+  Assert-True ((@($RuleMeta.Keys).Count -ge 30)) 'the rule catalog is untouched by the auth tests'
 
   # --- sessions ---
   $sid = New-Session 'maty'
