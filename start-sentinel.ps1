@@ -99,18 +99,23 @@ Write-Host "Launching Alpha Sentinel v$sentinelVersion monitor..." -ForegroundCo
 Write-Host "=================================================" -ForegroundColor White
 
 # Launch the main script - use -NoProfile to avoid loading user profiles
-# and -ExecutionPolicy Bypass. Forward all user args via @args.
-$process = Start-Process -FilePath 'powershell.exe' -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptFile, @args -PassThru -WindowStyle Hidden
+# and -ExecutionPolicy Bypass. Every argument given to this wrapper is forwarded.
+$fwd = @($args)
+$argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $scriptFile + '"'))
+foreach ($a in $fwd) {
+    if ("$a" -match '\s') { $argList += ('"' + $a + '"') } else { $argList += "$a" }
+}
+$process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -PassThru -WindowStyle Hidden
 
 Write-Host "Alpha Sentinel process started with PID: $($process.Id)" -ForegroundColor DarkGray
-Write-Host "Check the process is running: Get-Process -Id $process.Id" -ForegroundColor DarkGray
+Write-Host "Check the process is running: Get-Process -Id $($process.Id)" -ForegroundColor DarkGray
 
 # Print dashboard URL
 $bind = 'localhost'
 $port = 8443
-foreach ($arg in @args) {
-    if ($arg -eq '-Bind') { $bind = @args[@args.IndexOf($arg) + 1] }
-    if ($arg -eq '-Port') { $port = [int]@args[@args.IndexOf($arg) + 1] }
+for ($i = 0; $i -lt $fwd.Count; $i++) {
+    if ("$($fwd[$i])" -eq '-Bind' -and ($i + 1) -lt $fwd.Count) { $bind = "$($fwd[$i + 1])" }
+    if ("$($fwd[$i])" -eq '-Port' -and ($i + 1) -lt $fwd.Count) { $port = [int]$fwd[$i + 1] }
 }
 $dispBind = if ($bind -eq '0.0.0.0' -or $bind -eq '+' -or $bind -eq '*') { '0.0.0.0' } else { 'localhost' }
-Write-Host "Dashboard: http://$dispBind:$port" -ForegroundColor Cyan
+Write-Host "Dashboard: http://${dispBind}:$port" -ForegroundColor Cyan

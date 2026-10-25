@@ -2491,7 +2491,15 @@ exit 1
 
   # Test 7: start-sentinel.ps1 launches monitor with -Background and forwards args
   Assert-True ($startSentinelText -match 'Start-Process.*-WindowStyle Hidden') 'start-sentinel.ps1 launches with hidden window'
-  Assert-True ($startSentinelText -match '@args') 'start-sentinel.ps1 forwards user arguments'
+  Assert-True ($startSentinelText -match '\$fwd') 'start-sentinel.ps1 forwards user arguments'
+
+  # Every shipped PowerShell script must PARSE (this would have caught a broken start-sentinel.ps1)
+  $repoRoot = Split-Path -Parent $PSScriptRoot
+  foreach ($f in (Get-ChildItem -Path $repoRoot -Filter '*.ps1' -File) + (Get-Item (Join-Path $PSScriptRoot 'run-tests.ps1'))) {
+    $perr = $null; $ptok = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$ptok, [ref]$perr)
+    Assert-True (@($perr).Count -eq 0) ("$($f.Name) parses without syntax errors")
+  }
 
   # ---- Alert outputs: circuit breaker, rate limit, one-line sanitising ----
   & {
