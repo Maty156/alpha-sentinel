@@ -23,7 +23,7 @@ QUICK START:
 
 FILE STRUCTURE:
 ---------------
-AlphaSentinel.ps1  - Main monitor script (v2.6.0, 30 rule families)
+AlphaSentinel.ps1  - Main monitor script (v2.6.0, 36 rule families)
 start-sentinel.bat - Wrapper (first run or subsequent runs)
 start-sentinel.ps1 - Wrapper (first-run setup only, prompts for creds)
 sentinel-users.json - Auto-created (do not edit manually)
@@ -32,7 +32,7 @@ README.txt - This file
 USAGE:
 --------
 • The monitor polls Windows Event Logs (Security, System, Defender)
-• Detects 30 AD attack rule families (Kerberoasting, DCSync, brute force, etc.)
+• Detects 36 AD attack rule families (Kerberoasting, DCSync, brute force, etc.)
 • Dashboard shows alerts, coverage, attack paths, assets
 • Optional forwarding to web platform via -ForwardUrl/-ForwardKey
 • Wolf bot assistant answers questions about alerts, rules, coverage
