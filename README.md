@@ -37,9 +37,9 @@ powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1          # then ope
 
 | # | Full name | CTC ID | Role |
 |---|---|---|---|
-| 1 | [Full name] | [CTC ID] | [Role] |
-| 2 | [Full name] | [CTC ID] | [Role] |
-| 3 | [Full name] | [CTC ID] | [Role] |
+| 1 | Omer Muzemil | CTC-7061-26 | Test |
+| 2 | Surafel Ketema | [CTC ID] | [Role] |
+| 3 | Matyas Abreham | CTC-207-26 | [Role] |
 
 *A Python port (one codebase for Windows and Linux) is being developed in a separate
 repository.*
