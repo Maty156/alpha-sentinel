@@ -294,7 +294,7 @@ Eight pages, one file each (see `js/pages/`):
   alert-timeline appendix. It is a framed document with `css/print.css` for
   printing to PDF, and it says so plainly when the period is empty. Dates are
   validated (junk is refused, ranges over 31 days are refused).
-- **Detection Rules** - all 30 families with their audit-policy state: Working,
+- **Detection Rules** - all 36 families with their audit-policy state: Working,
   amber **Unverified** when the policy could not be read (that is not working, and
   it is counted separately in the header), or BLIND with the reason and the exact
   `auditpol` command that fixes it.
