@@ -19,7 +19,7 @@ separate private repo: `Maty156/alpha`).
 
 | File | What it is |
 |---|---|
-| `AlphaSentinel.ps1` | **The main tool (v2.2)** - background monitor + embedded web dashboard |
+|| `AlphaSentinel.ps1` | **The main tool (v2.6.0)** - background monitor + embedded web dashboard ||
 | `dashboard.html` / `dashboard.js` | The dashboard, served by AlphaSentinel behind a login - must sit beside the script |
 | `login.html` / `login.js` | The sign-in page (public) |
 | `New-SentinelAdmin.ps1` | Creates and manages the dashboard accounts in `sentinel-users.json` |
@@ -337,7 +337,7 @@ page name. Nothing is inline: no style or script element, no `on*` attribute, an
 Files are served from a **strict allowlist** (exact name, exact content type), so an
 unknown path or a `../` traversal is a plain 404.
 
-## Detection coverage (30 rule families)
+## Detection coverage (36 rule families)
 
 The catalog mirrors `alpha/utils/detectionRules.js` key-for-key - same rule keys,
 severities and event IDs, so an alert promoted in either product lands on the
@@ -348,10 +348,15 @@ same `rule_key`.
 | Brute force / spraying | password_spraying, brute_force_single_account, kerberos_preauth_spraying, ntlm_failed_auth, account_lockout_storm | 4625, 4771, 4776, 4740 |
 | Privilege escalation / identity abuse | privilege_escalation, account_created, account_control_changed, account_enabled_disabled, password_reset_by_admin, group_membership_removed, account_deleted | 4728/4732/4756, 4720, 4738, 4722, 4724, 4729/4733, 4726 |
 | Kerberos attacks / directory | kerberoasting, asrep_roasting, dcsync_replication, ldap_recon | 4769, 4768, 4662, 5141 |
-| Logon / services | suspicious_remote_logon, explicit_credential_logon, service_abuse | 4624, 4648, 4697/7045 |
+| Logon / services | suspicious_remote_logon, explicit_credential_logon, service_abuse, pass_the_hash_logon | 4624, 4648, 4697/7045 |
 | Persistence | scheduled_task_created, registry_persistence | 4698, 4657 |
 | Anti-forensics / defense evasion | log_tampering, audit_policy_changed, eventlog_service_stopped, defender_disabled, firewall_disabled, firewall_rule_modified, system_time_changed, special_privileges_assigned | 1102, 4719, 1100, 5001/5010/5012, 4950, 4946-4949, 4616, 4672 |
 | Discovery | anonymous_smb_session, ldap_recon | 4624 (type 3, no account), 4662, 5141 |
+| GPO & admin object | gpo_or_admin_object_modified | 5136 |
+| Computer account abuse | computer_account_abuse | 4741, 4742 |
+| Suspicious process creation | suspicious_process_creation | 4688 |
+| PowerShell script block | powershell_scriptblock | 4104 |
+| DSRM password set | dsrm_password_set | 4794 |
 
 Event **4950** (a whole firewall profile turned off) shares the **MPSSVC
 Rule-Level Policy Change** audit subcategory with 4946-4949, so the same
@@ -376,11 +381,19 @@ A few rules deliberately skip machine accounts (`DC01$`), system principals
 patterns, because those log on and replicate continuously by design - see the
 `description` of each rule.
 
+**New rules (v2.6.0) - key-for-key additions to alpha/utils/detectionRules.js:**
+- `gpo_or_admin_object_modified` (5136, High/Critical) - GPO/GPO link/AdminSDHolder/sIDHistory changes
+- `computer_account_abuse` (4741/4742, Medium/High) - non-admin computer creation, RBCD delegation changes
+- `suspicious_process_creation` (4688, High) - ntdsutil, vssadmin, reg save, rundll32 MiniDump, certutil, encoded PS (needs Process Creation audit + command-line logging)
+- `powershell_scriptblock` (4104, High) - Invoke-Mimikatz, FromBase64String+IEX, AmsiUtils, etc. (needs PowerShell Script Block Logging)
+- `dsrm_password_set` (4794, Critical) - DSRM password change on DC (always Critical)
+- `pass_the_hash_logon` (4624, Critical) - LogonType 9 or type 3 NTLM KeyLength=0 (needs Logon audit)
+
 ## Testing
 
 **1. Self-test (plumbing + thresholds).** The **Self-test** button in the
 dashboard, or `POST /api/self-test`. One synthetic event sequence per rule family
-through the real engine; reports how many of the 30 fired.
+through the real engine; reports how many of the 36 fired.
 
 **2. Fixture replay (field shapes).** The self-test invents its field names, so
 it cannot catch a rule reading the wrong field or the wrong channel. For that,
