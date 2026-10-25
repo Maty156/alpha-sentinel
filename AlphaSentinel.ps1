@@ -131,7 +131,15 @@ param(
   [string]$AuthFile = "",
   [string]$ReplayPath = "",
   # Maximum size of sentinel-history.csv in MB before rotation (default 25)
-  [int]$HistoryMaxMB = 25,
+  [string]$HistoryMaxMB = 25,
+  # Optional alert outputs (off by default)
+  [string]$WebhookUrl = "",
+  [string]$SmtpServer = "",
+  [string]$SmtpTo = "",
+  [string]$SmtpFrom = "",
+  [string]$SyslogHost = "",
+  [int]$SyslogPort = 514,
+  [string]$AlertMinSeverity = "High",
   # The dashboard shows a "DEMO DATA" marker ONLY when the operator says this is
   # a lab demo. Production never invents numbers; an empty dashboard says it is
   # empty (see the v2.3 front end).
@@ -942,6 +950,10 @@ function New-Alert($ruleKey, $description, $severityOverride, $fields, $dedupeKe
   if ($dedupeKey) { $Script:DedupeAlertId[$dedupeKey] = $alert.Id }
   $Script:NextAlertId++
   $Script:AlertsDirty = $true
+  
+  # Send alert via configured outputs (webhook, SMTP, syslog)
+  Send-AlertOutput $alert
+  
   return $alert
 }
 
@@ -4794,6 +4806,7 @@ function Invoke-Handler($ctx) {
           channels            = $channels
           forwarded           = $Script:Forwarded
           forwardingErrors    = $Script:ForwardFailures
+          alertOutputFailures = $Script:AlertOutputFailures
           auditBlind          = @(Get-RuleCatalog | Where-Object { $_.auditState -eq 'blind' }).Count
           uptimeSeconds       = $uptime
         } | ConvertTo-Json -Depth 4)
@@ -5523,6 +5536,119 @@ function New-EventShim($p) {
   $shim | Add-Member -MemberType ScriptProperty -Name XmlObj -Value ({ return $shimXml }.GetNewClosure()) -Force
   $shim | Add-Member -MemberType ScriptMethod -Name ToXml -Value { return $this.XmlObj.OuterXml } -Force
   return $shim
+}
+
+# ============================================================
+# ALERT OUTPUTS (Webhook, SMTP, Syslog) - off by default
+# ============================================================
+$Script:AlertOutputFailures = 0
+function Send-AlertOutput($alert) {
+  # Safety: ensure hashtables exist (for test harness compatibility)
+  if (-not $Script:RecentAlertTimes) { $Script:RecentAlertTimes = @{} }
+  
+  # Safety: ensure alert and its properties exist
+  if (-not $alert -or -not $alert.RuleKey) { return }
+  
+  # Respect minimum severity filter
+  $sevRank = @{ 'Critical' = 0; 'High' = 1; 'Medium' = 2; 'Low' = 3 }
+  $alertRank = if ($sevRank.ContainsKey($alert.Severity)) { $sevRank[$alert.Severity] } else { 99 }
+  $minRank = if ($sevRank.ContainsKey($AlertMinSeverity)) { $sevRank[$AlertMinSeverity] } else { 1 }
+  if ($alertRank -gt $minRank) { return }
+  
+  # Dedupe: only send once per rule+entity per 5 minutes
+  $entity = if ($alert.Entity -and "$($alert.Entity)") { $alert.Entity } else { "global" }
+  $dedupeKey = "output|$($alert.RuleKey)|$entity"
+  if ($Script:RecentAlertTimes.ContainsKey($dedupeKey) -and
+      ((Get-Date) - $Script:RecentAlertTimes[$dedupeKey]) -lt (New-TimeSpan -Minutes 5)) {
+    return
+  }
+  $Script:RecentAlertTimes[$dedupeKey] = Get-Date
+  
+  # Webhook (generic JSON POST)
+  if ($WebhookUrl) {
+    try {
+      $body = @{
+        isAlert     = $true
+        ruleKey     = $alert.RuleKey
+        severity    = $alert.Severity
+        title       = $alert.Title
+        description = $alert.Description
+        mitre       = $alert.Mitre
+        alertedAt   = $alert.Time
+        host        = $alert.Host
+        account     = $alert.Account
+        sourceIp    = $alert.SourceIp
+        eventId     = $alert.EventId
+      }
+      $json = $body | ConvertTo-Json -Depth 3
+      Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $json -ContentType "application/json" `
+        -TimeoutSec 8 -ErrorAction Stop | Out-Null
+    } catch {
+      $Script:AlertOutputFailures++
+      if ($Script:AlertOutputFailures -le 3) {
+        Write-Host "  [webhook] failed ($($Script:AlertOutputFailures) total): $_" -ForegroundColor DarkYellow
+      }
+    }
+  }
+  
+  # SMTP (Send-MailMessage or System.Net.Mail)
+  if ($SmtpServer -and $SmtpTo -and $SmtpFrom) {
+    try {
+      $subject = "ALPHA Sentinel: $($alert.Severity) - $($alert.Title)"
+      $body = @"
+ALPHA Sentinel Alert
+====================
+Rule: $($alert.RuleKey)
+Severity: $($alert.Severity)
+Title: $($alert.Title)
+Description: $($alert.Description)
+Host: $($alert.Host)
+Account: $($alert.Account)
+Source IP: $($alert.SourceIp)
+Event ID: $($alert.EventId)
+MITRE: $($alert.Mitre)
+Time: $($alert.Time)
+"@
+      if ($SmtpServer -match '^smtp\.') {
+        Send-MailMessage -SmtpServer $SmtpServer -To $SmtpTo -From $SmtpFrom `
+          -Subject $subject -Body $body -Priority High -ErrorAction Stop
+      } else {
+        # Use System.Net.Mail for non-standard ports
+        $mail = New-Object System.Net.Mail.MailMessage
+        $mail.From = $SmtpFrom
+        $mail.To.Add($SmtpTo)
+        $mail.Subject = $subject
+        $mail.Body = $body
+        $mail.Priority = [System.Net.Mail.MailPriority]::High
+        $client = New-Object System.Net.Mail.SmtpClient($SmtpServer)
+        $client.Send($mail)
+        $client.Dispose()
+      }
+    } catch {
+      $Script:AlertOutputFailures++
+      if ($Script:AlertOutputFailures -le 3) {
+        Write-Host "  [smtp] failed ($($Script:AlertOutputFailures) total): $_" -ForegroundColor DarkYellow
+      }
+    }
+  }
+  
+  # Syslog (UDP RFC5424)
+  if ($SyslogHost) {
+    try {
+      $msg = "<165>1 $(Get-Date -Format u) $(hostname) AlphaSentinel $($alert.RuleKey) $($alert.Id) - "
+      $msg += "severity=$($alert.Severity) title=$($alert.Title) host=$($alert.Host) account=$($alert.Account) sourceIp=$($alert.SourceIp) eventId=$($alert.EventId) mitre=$($alert.Mitre)"
+      $bytes = [Text.Encoding]::UTF8.GetBytes($msg)
+      $udp = New-Object System.Net.Sockets.UdpClient
+      $udp.Connect($SyslogHost, $SyslogPort)
+      $udp.Send($bytes, $bytes.Length) | Out-Null
+      $udp.Close()
+    } catch {
+      $Script:AlertOutputFailures++
+      if ($Script:AlertOutputFailures -le 3) {
+        Write-Host "  [syslog] failed ($($Script:AlertOutputFailures) total): $_" -ForegroundColor DarkYellow
+      }
+    }
+  }
 }
 
 # ============================================================
