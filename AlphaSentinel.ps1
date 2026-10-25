@@ -232,17 +232,6 @@ try {
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch { }
 
-# Platform detection
-if ($PSVersionTable.PSEdition -eq 'Core' -and (Get-Variable IsLinux -ErrorAction SilentlyContinue) -and $IsLinux) {
-  $Script:Platform = 'Linux'
-} else {
-  $Script:Platform = 'Windows'
-}
-
-if ($Script:Platform -ne 'Windows' -and $Script:Platform -ne 'Linux') {
-  Write-Exit "Unsupported OS: $Script:Platform. This tool runs on Windows (PowerShell 5.1+) or Linux (PowerShell 7+)."
-}
-
 # ============================================================
 # DETECTION RULES (36 families)
 # ============================================================

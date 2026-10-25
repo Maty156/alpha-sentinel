@@ -1,5 +1,51 @@
 # ALPHA SENTINEL v2.6.0 - AD / Network Attack Monitor (background service + web dashboard)
 
+## Project information
+
+**Purpose.** Active Directory is the target of most enterprise intrusions, yet small
+organisations rarely have a SIEM. ALPHA Sentinel is a zero-dependency monitor that
+runs on a Domain Controller (or any domain-joined Windows machine), reads the
+Windows event logs, detects the common AD attack techniques, and shows them in a
+web dashboard - no agent install, no database, one PowerShell script.
+
+**Main features**
+- **36 detection rules** mapped to MITRE ATT&CK: Kerberoasting, AS-REP roasting,
+  DCSync, password spraying and brute force, pass-the-hash, LDAP/SAMR recon,
+  privilege escalation, GPO / AdminSDHolder tampering, computer-account abuse (RBCD),
+  suspicious process creation and PowerShell script blocks, persistence (services,
+  scheduled tasks, registry), log tampering, Defender / firewall tampering.
+- **Web dashboard behind a login** (PBKDF2-hashed accounts, sessions, rate-limited
+  sign-in): overview, alerts with triage, events, assets, attack paths and chains,
+  rule coverage, reports, and settings.
+- **Audit-policy preflight and one-step `-EnableAudit`** (backs the policy up first).
+- **Optional alert outputs**: webhook, SMTP, syslog - with 3 s timeouts, a circuit
+  breaker and rate limiting so a dead server can never freeze detection.
+- **Replay mode** (`-ReplayPath`) and a **test suite** with real-shaped event fixtures.
+- Alert history with rotation, survives restarts; optional forwarding to a web platform.
+
+**Quick demo (lab):**
+```powershell
+.\New-SentinelAdmin.ps1                                              # create the login (password shown once)
+powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1 -EnableAudit
+powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1          # then open http://localhost:8443
+.\tests\run-tests.ps1                                                # run the test suite
+```
+
+**Video presentation:** [add the link here]
+
+**Team**
+
+| # | Full name | CTC ID | Role |
+|---|---|---|---|
+| 1 | [Full name] | [CTC ID] | [Role] |
+| 2 | [Full name] | [CTC ID] | [Role] |
+| 3 | [Full name] | [CTC ID] | [Role] |
+
+*A Python port (one codebase for Windows and Linux) is being developed in a separate
+repository.*
+
+---
+
 A standalone Windows security-monitoring tool from the **Alpha Cybersecurity**
 graduation project - **Wazuh's agent + dashboard model as ONE zero-dependency
 script**: Sentinel runs silently in the BACKGROUND on a Domain Controller (or
@@ -410,7 +456,7 @@ event log, no HTTP and no network needed - by a runner that drives the same
 functions the live monitor uses:
 
 ```powershell
-.\tests\run-tests.ps1      # 857 assertions, exit code 1 on any failure
+.\tests\run-tests.ps1      # 925 assertions, exit code 1 on any failure (2 backlog catch-up checks are a known open issue)
 ```
 
 It covers detection behaviour in both directions, dedupe-per-entity, the
