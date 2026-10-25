@@ -103,6 +103,14 @@ $engineText = [regex]::Replace($engineText, '(?s)param\(.*?\r?\n\)\r?\n', @"
 `$UsersFile = ''
 `$AuthFile = ''
 `$ReplayPath = ''
+`$HistoryMaxMB = 25
+`$WebhookUrl = ''
+`$SmtpServer = ''
+`$SmtpTo = ''
+`$SmtpFrom = ''
+`$SyslogHost = ''
+`$SyslogPort = 514
+`$AlertMinSeverity = 'High'
 "@, 1)
 
 $tmp = [IO.Path]::Combine([IO.Path]::GetTempPath(), "sentinel-tests-$PID")
