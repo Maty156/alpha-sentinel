@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.6.0 - Modern Cyber Defense Platform & Attack Paths Release
+## v2.6.0 - Modern Cyber Defense Platform & Attack Paths Release + 6 New Detection Rules
 
 Complete modernization of Alpha Sentinel for enterprise-grade SOC analysis, startup presentations, and graduation project distinction.
 
@@ -25,6 +25,34 @@ Complete modernization of Alpha Sentinel for enterprise-grade SOC analysis, star
 - Modern dark cyber aesthetic with glassmorphic translucent surfaces (`backdrop-filter: blur`), glowing telemetry rings, and refined depth shadows (`css/tokens.css`, `css/base.css`, `css/layout.css`, `css/components.css`, `css/pages.css`, `css/login.css`).
 - Live telemetry radar pulse indicators for healthy, degraded, and breach states.
 - High-tech sign-in portal with glowing shield emblem and modern security styling.
+
+### 5. Six New Detection Rules (36 total)
+
+#### gpo_or_admin_object_modified (Event 5136, High/Critical)
+Detects modifications to Group Policy Objects (groupPolicyContainer), GPO links (gPLink), AdminSDHolder nTSecurityDescriptor, and sIDHistory attribute. sIDHistory or AdminSDHolder changes are Critical. Audit subcategory: Directory Service Changes.
+
+#### computer_account_abuse (Events 4741/4742, Medium/High)
+Detects computer account creation by non-admin users and delegation attribute changes (msDS-AllowedToActOnBehalfOfOtherIdentity - RBCD pattern). Audit subcategory: Computer Account Management.
+
+#### suspicious_process_creation (Event 4688, High)
+Detects suspicious command lines: ntdsutil, vssadmin delete/create shadow, reg save of SAM/SYSTEM/SECURITY, rundll32 comsvcs.dll MiniDump, certutil -urlcache, encoded PowerShell (-enc). Requires "Process Creation" audit + command-line logging (ProcessCreationIncludeCmdLine_Enabled). Audit subcategory: Process Creation.
+
+#### powershell_scriptblock (Event 4104, High)
+Detects offensive PowerShell script blocks: Invoke-Mimikatz, DumpCreds, Invoke-Kerberoast, FromBase64String+IEX, AmsiUtils, Invoke-Obfuscation, WebClient.DownloadString, Start-Process -WindowStyle Hidden. Requires PowerShell Script Block Logging. Audit subcategory: PowerShell Script Block Logging.
+
+#### dsrm_password_set (Event 4794, Critical)
+Detects DSRM password changes on Domain Controllers - always Critical as it indicates potential compromise for later DSRM boot and NTDS.dit extraction. Audit subcategory: User Account Management.
+
+#### pass_the_hash_logon (Event 4624, Critical)
+Detects pass-the-hash logons: LogonType 9 (new credentials) or LogonType 3 with NTLM and KeyLength=0 from non-machine accounts to non-localhost sources. Audit subcategory: Logon.
+
+All 6 rule keys need adding to alpha/utils/detectionRules.js:
+- gpo_or_admin_object_modified
+- computer_account_abuse
+- suspicious_process_creation
+- powershell_scriptblock
+- dsrm_password_set
+- pass_the_hash_logon
 
 ## v2.5.1
 
