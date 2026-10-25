@@ -130,6 +130,8 @@ param(
   [string]$UsersFile = "",
   [string]$AuthFile = "",
   [string]$ReplayPath = "",
+  # Maximum size of sentinel-history.csv in MB before rotation (default 25)
+  [int]$HistoryMaxMB = 25,
   # The dashboard shows a "DEMO DATA" marker ONLY when the operator says this is
   # a lab demo. Production never invents numbers; an empty dashboard says it is
   # empty (see the v2.3 front end).
@@ -2994,6 +2996,9 @@ function Evaluate-Event($e) {
 # ============================================================
 function Save-History {
   try {
+    # Check and rotate history file if it exceeds the max size
+    Check-HistoryRotation
+    
     # Severity / Title / Rule / EventId / SelfTest are written so the restore
     # path can put an in-place-UPGRADED alert back at the severity it reached
     # instead of the rule's default. This file is read back by the script, so it
@@ -3004,6 +3009,38 @@ function Save-History {
         @{ n = 'SelfTest'; e = { if ($_.SelfTest) { 'yes' } else { 'no' } } } |
       Export-Csv -Path $HistoryFile -NoTypeInformation -Force -Encoding UTF8
   } catch { }
+}
+
+# Rotate sentinel-history.csv if it exceeds HistoryMaxMB.
+# Keeps open/unresolved alerts in the active file, archives resolved alerts to
+# sentinel-history-<date>.csv.
+function Check-HistoryRotation {
+  if (-not (Test-Path $HistoryFile)) { return }
+  $sizeMB = (Get-Item $HistoryFile).Length / 1MB
+  if ($sizeMB -lt $HistoryMaxMB) { return }
+  
+  # Read all alerts from history
+  $allRows = Import-Csv $HistoryFile
+  if (-not $allRows) { return }
+  
+  # Separate open/unresolved alerts from resolved ones
+  $openRows = @($allRows | Where-Object { $_.Status -ne 'Resolved' -and $_.Status -ne 'False Positive' })
+  $resolvedRows = @($allRows | Where-Object { $_.Status -eq 'Resolved' -or $_.Status -eq 'False Positive' })
+  
+  if ($resolvedRows.Count -eq 0) { return } # nothing to archive
+  
+  # Archive resolved alerts
+  $archiveDate = (Get-Date).ToString('yyyyMMdd')
+  $archiveFile = if ($PSScriptRoot) {
+    Join-Path $PSScriptRoot ("sentinel-history-" + $archiveDate + ".csv")
+  } else {
+    "sentinel-history-" + $archiveDate + ".csv"
+  }
+  
+  $resolvedRows | Export-Csv -Path $archiveFile -NoTypeInformation -Force -Encoding UTF8
+  
+  # Keep only open alerts in the active history file
+  $openRows | Export-Csv -Path $HistoryFile -NoTypeInformation -Force -Encoding UTF8
 }
 
 # CSV FORMULA INJECTION: the attacker picks their own usernames, service names,
