@@ -2474,7 +2474,7 @@ exit 1
   Assert-True (-not ($startSentinelText -match 'RandomNumberGenerator.*GetBytes')) 'start-sentinel.ps1 has no static RandomNumberGenerator::GetBytes call (uses New-SentinelAdmin.ps1 instead)'
 
   # Test 3: start-sentinel.ps1 delegates to New-SentinelAdmin.ps1 for account creation
-    Assert-True ($startSentinelText -match 'New-SentinelAdmin\\.ps1' -and $startSentinelText -match '-Username\\s+\\$adminName') 'start-sentinel.ps1 calls New-SentinelAdmin.ps1 for account creation'
+    Assert-True ($startSentinelText -match 'New-SentinelAdmin\.ps1' -and $startSentinelText -match '-Username\s+\$adminName') 'start-sentinel.ps1 calls New-SentinelAdmin.ps1 for account creation'
 
   # Test 4: start-sentinel.ps1 reads version from AlphaSentinel.ps1
   Assert-True ($startSentinelText -match '\$Script:SentinelVersion') 'start-sentinel.ps1 reads version from AlphaSentinel.ps1'
@@ -2483,7 +2483,7 @@ exit 1
   $adminScriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'New-SentinelAdmin.ps1'
   $adminScriptText = Get-Content -Raw $adminScriptPath
   Assert-True ($adminScriptText -match 'Set-UserFileAcl') 'New-SentinelAdmin.ps1 contains Set-UserFileAcl'
-  Assert-True ($startSentinelText -match 'New-SentinelAdmin\\.ps1') 'start-sentinel.ps1 delegates to New-SentinelAdmin.ps1'
+  Assert-True ($startSentinelText -match 'New-SentinelAdmin\.ps1') 'start-sentinel.ps1 delegates to New-SentinelAdmin.ps1'
 
   # Test 6: start-sentinel.ps1 zeros plaintext password strings
   Assert-True ($startSentinelText -match 'ZeroFreeBSTR') 'start-sentinel.ps1 zeroes BSTR after use'
