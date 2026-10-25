@@ -54,6 +54,22 @@ All 6 rule keys need adding to alpha/utils/detectionRules.js:
 - dsrm_password_set
 - pass_the_hash_logon
 
+### 6. History rotation
+- New `-HistoryMaxMB` (integer, default 25). When `sentinel-history.csv` grows past the limit, resolved and false-positive alerts are archived to `sentinel-history-<date>.csv`; open alerts stay in the active file.
+
+### 7. Optional alert outputs (off by default)
+- `-WebhookUrl` (generic JSON POST), `-SmtpServer` (`host` or `host:port`) with `-SmtpTo` / `-SmtpFrom`, and `-SyslogHost` / `-SyslogPort` (UDP, RFC 5424), filtered by `-AlertMinSeverity` (default High) and de-duplicated per rule and entity for 5 minutes.
+- Protected so a dead server cannot freeze the single-threaded poll loop: 3 second timeouts on every call, a per-output circuit breaker (3 consecutive failures pause that output for 60 seconds), and a per-output limit of 20 messages per minute.
+- `/api/status` reports `alertOutputFailures` and `alertOutputDropped`. Alerts skipped by the breaker or rate limit remain on the dashboard and in the history.
+- Message text is flattened to one line (no mail-header or syslog injection). SMTP uses System.Net.Mail with a real timeout instead of Send-MailMessage.
+
+### 8. Project files
+- Added `LICENSE` (MIT) and a GitHub Actions workflow that runs the test suite on Windows PowerShell 5.1 and PowerShell 7.
+- Not yet implemented: `-ComputerName` (polling several domain controllers).
+
+### New rule keys that need adding to `alpha/utils/detectionRules.js`
+`gpo_or_admin_object_modified`, `computer_account_abuse`, `suspicious_process_creation`, `powershell_scriptblock`, `dsrm_password_set`, `pass_the_hash_logon`
+
 ## v2.5.1
 
 Two new detection families - the 28-rule set becomes **30**. **883 assertions**
