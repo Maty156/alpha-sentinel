@@ -2493,6 +2493,62 @@ exit 1
   Assert-True ($startSentinelText -match 'Start-Process.*-WindowStyle Hidden') 'start-sentinel.ps1 launches with hidden window'
   Assert-True ($startSentinelText -match '@args') 'start-sentinel.ps1 forwards user arguments'
 
+  # ---- Alert outputs: circuit breaker, rate limit, one-line sanitising ----
+  & {
+    $outText = Get-Section $raw '# ALERT OUTPUTS (Webhook, SMTP, Syslog)' '# OPTIONAL WEB FORWARDING'
+    . ([scriptblock]::Create($outText))
+
+    # rate limit: 20 per rolling minute per output, the rest are dropped and counted
+    $Script:AlertOutputState = $null; $Script:AlertOutputDropped = 0
+    $allowed = 0
+    for ($i = 1; $i -le 25; $i++) { if (Test-AlertOutputAllowed 'webhook') { $allowed++ } }
+    Assert-True ($allowed -eq 20) 'alert output rate limit allows exactly 20 per minute'
+    Assert-True ($Script:AlertOutputDropped -eq 5) 'alert output rate limit counts the 5 dropped messages'
+    Assert-True (Test-AlertOutputAllowed 'syslog') 'alert output rate limit is tracked per output'
+
+    # breaker opens after 3 consecutive failures and a success resets the count
+    $Script:AlertOutputState = $null; $Script:AlertOutputFailures = 0; $Script:AlertOutputDropped = 0
+    Register-AlertOutputResult 'x' $false 'e1' | Out-Null
+    Register-AlertOutputResult 'x' $false 'e2' | Out-Null
+    Register-AlertOutputResult 'x' $true '' | Out-Null
+    Register-AlertOutputResult 'x' $false 'e1' | Out-Null
+    Register-AlertOutputResult 'x' $false 'e2' | Out-Null
+    Assert-True ((Test-AlertOutputAllowed 'x')) 'a success resets the failure count so the breaker stays closed'
+    Register-AlertOutputResult 'x' $false 'e3' | Out-Null
+    Assert-True (-not (Test-AlertOutputAllowed 'x')) 'three consecutive failures open the breaker (output paused)'
+
+    # end to end with a dead webhook: nothing listens on 127.0.0.1:1
+    $Script:AlertOutputState = $null; $Script:AlertOutputFailures = 0; $Script:AlertOutputDropped = 0
+    $Script:RecentAlertTimes = @{}
+    $WebhookUrl = 'http://127.0.0.1:1/hook'; $SmtpServer = ''; $SyslogHost = ''; $AlertMinSeverity = 'High'
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    for ($i = 1; $i -le 6; $i++) {
+      $a = [PSCustomObject]@{ RuleKey = 'test_rule'; Severity = 'High'; Title = 't'; Description = 'd'; Mitre = 'T1'
+                              Time = 'now'; Host = 'h'; Account = "acct$i"; SourceIp = '1.1.1.1'; EventId = '1'
+                              Entity = "e$i"; Id = $i }
+      Send-AlertOutput $a
+    }
+    $sw.Stop()
+    Assert-True ($Script:AlertOutputFailures -eq 3) 'dead webhook: only 3 real attempts are made before the breaker opens'
+    Assert-True ($Script:AlertOutputDropped -eq 3) 'dead webhook: the remaining 3 alerts are dropped, not retried'
+    Assert-True ($sw.Elapsed.TotalSeconds -lt 12) 'dead webhook: six alerts never stall the loop (3 s timeout cap per attempt)'
+
+    # severity filter: alerts below the minimum are never sent
+    $before = $Script:AlertOutputFailures + $Script:AlertOutputDropped
+    $Script:AlertOutputState = $null
+    $low = [PSCustomObject]@{ RuleKey = 'r'; Severity = 'Low'; Title = 't'; Entity = 'z'; Id = 99 }
+    Send-AlertOutput $low
+    Assert-True (($Script:AlertOutputFailures + $Script:AlertOutputDropped) -eq $before) 'alerts below -AlertMinSeverity are never sent'
+
+    # one-line sanitising (mail / syslog injection)
+    Assert-True ((ConvertTo-OneLine "a`r`nBcc: evil@x.test") -eq 'a Bcc: evil@x.test') 'alert output text is flattened to one line'
+
+    # static guards: short timeouts everywhere, no blocking Send-MailMessage
+    Assert-True ($outText -notmatch 'Send-MailMessage') 'alert outputs do not use Send-MailMessage (no timeout)'
+    Assert-True ($outText -match '\$client\.Timeout') 'SMTP client has an explicit timeout'
+    Assert-True ($outText -match '-TimeoutSec \$Script:AlertOutputTimeoutSec') 'webhook has an explicit timeout'
+  }
+
   Write-Host ""
   $colour = if ($script:Fail -eq 0) { 'Green' } else { 'Red' }
   Write-Host ("RESULT: " + $script:Pass + " passed, " + $script:Fail + " failed") -ForegroundColor $colour
