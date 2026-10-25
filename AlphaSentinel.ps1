@@ -131,7 +131,7 @@ param(
   [string]$AuthFile = "",
   [string]$ReplayPath = "",
   # Maximum size of sentinel-history.csv in MB before rotation (default 25)
-  [ref]$HistoryMaxMB = 25,
+  [int]$HistoryMaxMB = 25,
   # Optional alert outputs (off by default)
   [string]$WebhookUrl = "",
   [string]$SmtpServer = "",
