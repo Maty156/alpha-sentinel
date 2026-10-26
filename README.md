@@ -31,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1          # then ope
 .\tests\run-tests.ps1                                                # run the test suite
 ```
 
-**Video presentation:** [add the link here]
+**Video presentation:** [https://drive.google.com/file/d/1wvxiuGmjbVwOv8mue3jKbEQOhVNKsUNy/view?usp=drivesdk]
 
 **Team**
 
