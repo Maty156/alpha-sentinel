@@ -37,9 +37,12 @@ powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1          # then ope
 
 | # | Full name | CTC ID | Role |
 |---|---|---|---|
-| 1 | Omer Muzemil | CTC-7061-26 | Test |
-| 2 | Surafel Ketema | [CTC ID] | [Role] |
-| 3 | Matyas Abreham | CTC-207-26 | [Role] |
+| 1 | Matyas Abreham | CTC-207-26 | Project Lead & Lead Developer (architecture, detection engine, dashboard, testing, documentation) |
+| 2 | Nathnail Wassie | CTC-7656-26 | Frontend Developer |
+| 3 | Abu Geleta | CTC-4372-26 | Backend Developer |
+| 4 | Omer Muzemil | CTC-7061-26 | Backend Developer |
+| 5 | Surafel Ketema | CTC-307-26 | Frontend Developer |
+| 6 | Eyorika Kassaye | CTC-6619-26 | Tester |
 
 *A Python port (one codebase for Windows and Linux) is being developed in a separate
 repository.*
