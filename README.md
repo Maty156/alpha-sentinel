@@ -58,17 +58,51 @@ roasting), LDAP/SAMR enumeration, password spraying, privilege escalation,
 DCSync, suspicious remote logons, service abuse, persistence, and log
 tampering - and serves a **modern web dashboard behind a login** you open in a
 browser. Optionally forwards every detection to the **ALPHA web platform** (a
-separate private repo: `Maty156/alpha`).
+separate repo: [`Maty156/alpha`](https://github.com/Maty156/alpha)).
 
 > The web platform (marketing site, client portal, admin panel, assessments,
 > certificates) lives in its **own repo**. This repo is the Windows tooling
 > only - Sentinel works fully standalone with zero dependency on the website.
 
+## The ALPHA web portal
+
+The companion web platform, **ALPHA**, is hosted on Vercel:
+
+**Live portal:** https://alpha-sooty-iota.vercel.app/
+**Source code:** https://github.com/Maty156/alpha
+
+The portal is the client-facing side of the project. It connects clients with the
+admin / AD security tester in one place, so an engagement does not have to run over
+scattered emails and file transfers.
+
+**What the portal does**
+
+- **Client and admin accounts** - clients register and sign in to follow their own engagement.
+- **Assessment tracking** - progress is shown by stage (Scope, Assessment, Analysis, Report).
+- **Secure messaging** - clients and the testing team communicate inside the portal.
+- **Report delivery** - the admin / tester sends the finished assessment report to the
+  client directly through the portal. Reports include findings, evidence,
+  recommendations, risk ratings and a technical and a non-technical summary.
+- **Completion certificate** - issued together with the report, with a QR code so it
+  can be verified.
+
+**How the two fit together**
+
+| Component | Role |
+|---|---|
+| **Alpha Sentinel** (this repo) | AD / network attack monitor that runs on the Domain Controller or a domain-joined machine |
+| **ALPHA web portal** | Hosted portal where clients and the admin / tester connect, exchange messages and receive reports |
+
+With forwarding enabled (`-ForwardUrl` / `-ForwardKey`, see
+[Forwarding to the web platform](#forwarding-to-the-web-platform)), Sentinel sends its
+detections to the portal, where the admin can review them. Without it, Sentinel keeps
+working fully standalone.
+
 ## Tools in this repo
 
 | File | What it is |
 |---|---|
-|| `AlphaSentinel.ps1` | **The main tool (v2.6.0)** - background monitor + embedded web dashboard ||
+| `AlphaSentinel.ps1` | **The main tool (v2.6.0)** - background monitor + embedded web dashboard |
 | `dashboard.html` | The dashboard, served by AlphaSentinel behind a login - must sit beside the script |
 | `login.html` / `login.js` | The sign-in page (public) |
 | `New-SentinelAdmin.ps1` | Creates and manages the dashboard accounts in `sentinel-users.json` |
