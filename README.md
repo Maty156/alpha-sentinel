@@ -41,7 +41,7 @@ powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1          # then ope
 | 2 | Nathnail Wassie | CTC-7656-26 | Frontend Developer |
 | 3 | Abu Geleta | CTC-4372-26 | Backend Developer |
 | 4 | Omer Muzemil | CTC-7061-26 | Backend Developer, Front Developer, Tester, Presenter |
-| 5 | Surafel Ketema | CTC-307-26 | Frontend Developer |
+| 5 | Surafel Ketema | CTC-378-26 | Frontend Developer |
 | 6 | Eyorika Kassaye | CTC-6619-26 | Tester |
 
 *A Python port (one codebase for Windows and Linux) is being developed in a separate
