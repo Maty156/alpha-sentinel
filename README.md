@@ -573,3 +573,13 @@ top of `collector.ps1`.
 
 Academic prototype - Alpha Cybersecurity is a student graduation project, not a
 commercial security firm.
+
+
+## Wolf AI assistant (optional)
+
+Settings > Account > Wolf Bot AI Assistant. Without a key Wolf answers from built-in rules. With a key it asks an AI model, giving it a summary of your live alerts and audit coverage.
+
+- **Provider:** Google AI Studio (key from aistudio.google.com) or any OpenAI-compatible service (FreeLLMAPI, OpenRouter, Ollama...). For the second, enter the base URL, usually ending in `/v1`. The key is sent to that address, so only use a service you trust.
+- **Model:** pick from the list or choose "Other (type it)". Free-tier example: `gemini-3.1-flash-lite`.
+- **Files:** `sentinel-gemini.key` (the key) and `sentinel-ai.json` (provider, base URL, model). Both are restricted to Administrators and SYSTEM. Do not commit them.
+- If the AI call fails, the built-in answer is shown with the reason.

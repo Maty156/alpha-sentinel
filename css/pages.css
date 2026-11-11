@@ -17,6 +17,7 @@
 .tile-note.warn { color: var(--warn); }
 .tile-note.bad { color: var(--bad); }
 .rule-unknown { color: var(--warn); border-color: var(--warn); }
+.rule-na { color: var(--muted, #8b95a5); border-color: var(--muted, #8b95a5); }
 .coverage-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2); }
 .coverage-value { font-size: 26px; font-weight: 600; color: var(--ok); }
 .coverage-value.warn { color: var(--warn); }
@@ -517,3 +518,25 @@ table.data th.sortable:hover { color: var(--text); }
   border-radius: var(--radius-sm);
   font-size: 12px;
 }
+
+/* Wolf page */
+.wolf-layout{display:grid;grid-template-columns:240px 1fr;gap:12px;height:calc(100vh - 150px);min-height:360px}
+.wolf-side{display:flex;flex-direction:column;gap:8px;min-height:0;background:var(--surface-card);border:1px solid var(--line);border-radius:var(--radius);padding:10px}
+.wolf-new{width:100%}
+.wolf-list{flex:1;overflow:auto;display:flex;flex-direction:column;gap:4px}
+.wolf-item{display:flex;align-items:center;border-radius:8px;border:1px solid transparent}
+.wolf-item.active{background:var(--brand-soft);border-color:var(--line-2)}
+.wolf-title{flex:1;min-width:0;text-align:left;background:none;border:none;color:var(--text);font-size:13px;padding:8px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wolf-del{background:none;border:none;color:var(--text-mute);font-size:16px;cursor:pointer;padding:4px 8px}
+.wolf-del:hover{color:var(--sev-critical)}
+.wolf-hint{color:var(--text-mute);font-size:11px}
+.wolf-main{display:flex;flex-direction:column;min-height:0;background:var(--surface-card);border:1px solid var(--line);border-radius:var(--radius)}
+.wolf-msgs{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+.wolf-row{display:flex}
+.wolf-user{justify-content:flex-end}
+.wolf-bubble{max-width:78%;padding:10px 12px;border-radius:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;font-size:14px}
+.wolf-bot .wolf-bubble{background:var(--bg-2);color:var(--text);border:1px solid var(--line);border-bottom-left-radius:3px}
+.wolf-user .wolf-bubble{background:var(--brand);color:#fff;border-bottom-right-radius:3px}
+.wolf-inputrow{display:flex;gap:8px;padding:12px;border-top:1px solid var(--line)}
+.wolf-input{flex:1;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--text);font-size:14px;outline:none}
+@media (max-width:800px){.wolf-layout{grid-template-columns:1fr;height:auto}.wolf-side{max-height:180px}.wolf-main{height:60vh}}

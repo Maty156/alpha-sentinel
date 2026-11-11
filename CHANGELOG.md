@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.6.1
+- Wolf AI: the bot works again. The old call used the retired `gemini-1.5-flash` model with the key in the URL and a syntax slip (`Get-Content -Raw (if ...)`) that stopped it ever answering.
+- New AI settings (Settings > Account): provider (Google AI Studio or any OpenAI-compatible service such as FreeLLMAPI/OpenRouter/Ollama), base URL, and a model dropdown (default `gemini-3.1-flash-lite`, free tier) with "Other (type it)". Stored in `sentinel-ai.json`; the key stays in `sentinel-gemini.key`, only readable by Administrators/SYSTEM, sent only in a request header and never returned by the API.
+- Key check accepts new-style keys (dots allowed); TLS 1.2 is forced for Windows Server 2012 R2.
+- When the AI fails, the built-in answer is shown with the real (key-free) reason.
+- Wolf's prompt now includes open alerts, the latest alerts, audit-coverage (blind rules and fixes), alerts fired per rule and poller lag. Wolf stays "Wolf".
+- Full-screen chat toggle in the Wolf panel. The conversation is kept in the browser (last 40 messages, "Clear" button) and the last few turns are sent to Wolf as context.
+- New tests for the AI settings, key safety and prompt.
+- Wolf page in the sidebar with several chats and a New chat button; chats are kept in the browser. The floating widget shares the same chats.
+- Fixed: the PowerShell Script Block rule was permanently "blind" because it was checked against an auditpol subcategory that does not exist. Coverage now checks the real settings (the "Turn on PowerShell Script Block Logging" policy and the PowerShell/Operational log), Preflight shows the exact fix, and Settings > Audit (or -EnableAudit) can turn it on, additive only.
+
 ## v2.6.0 - Modern Cyber Defense Platform & Attack Paths Release + 6 New Detection Rules
 
 Complete modernization of Alpha Sentinel for enterprise-grade SOC analysis, startup presentations, and graduation project distinction.

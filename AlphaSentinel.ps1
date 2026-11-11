@@ -316,7 +316,8 @@ $RuleAudit = @{
   gpo_or_admin_object_modified = @{ Sub = @('Directory Service Changes'); Need = 'Success' }
   computer_account_abuse      = @{ Sub = @('Computer Account Management'); Need = 'Success' }
   suspicious_process_creation = @{ Sub = @('Process Creation'); Need = 'Success' }
-  powershell_scriptblock      = @{ Sub = @('PowerShell Script Block Logging'); Need = 'Success' }
+  # Script Block Logging is a POLICY (registry) setting plus an event-log channel, NOT an auditpol subcategory.
+  powershell_scriptblock      = @{ Sub = $null; Need = $null; Policy = 'scriptblock' }
   dsrm_password_set           = @{ Sub = @('User Account Management'); Need = 'Success' }
   pass_the_hash_logon         = @{ Sub = @('Logon'); Need = 'Success' }
 }
@@ -1224,7 +1225,8 @@ function Get-OverviewPayload {
   $rules = @(Get-RuleCatalog)
   $blind = @($rules | Where-Object { $_.auditState -eq 'blind' })
   $unknown = @($rules | Where-Object { $_.auditState -eq 'unknown' })
-  $total = $rules.Count
+  $unsupported = @($rules | Where-Object { $_.auditState -eq 'unsupported' })
+  $total = $rules.Count - $unsupported.Count
   $working = $total - $blind.Count - $unknown.Count
   if ($working -lt 0) { $working = 0 }
   $percent = 0
@@ -3137,8 +3139,15 @@ function Get-RuleCatalog {
       # every channel that writes this family's events is absent from this OS:
       # nobody can confirm the family works, so it is unverified (not blind -
       # nothing is misconfigured - and not ok)
+      if ($k -eq 'defender_disabled') {
+        # Defender is not installed here (e.g. Server 2012 R2): the rule cannot fire and
+        # nothing is misconfigured, so it is reported as unsupported, not unverified
+        $audit = [PSCustomObject]@{ state = 'unsupported'; subcategory = $audit.subcategory; need = $audit.need
+          detail = 'Windows Defender is not installed on this OS (no Defender event log) - rule applies to Server 2016+/Windows 10+' }
+      } else {
       $audit = [PSCustomObject]@{ state = 'unknown'; subcategory = $audit.subcategory; need = $audit.need
         detail = 'log not present on this OS - skipped, so this family is unverified rather than blind' }
+      }
     }
     $list += [PSCustomObject]@{
       key           = $k
@@ -3186,12 +3195,46 @@ function Get-AuditPolicyState {
   return $state
 }
 
+# PowerShell Script Block Logging (event 4104) is not an auditpol subcategory. Windows
+# writes the full script text only when the "Turn on PowerShell Script Block Logging"
+# policy is on (registry value below, set by Group Policy or directly) AND the
+# Microsoft-Windows-PowerShell/Operational channel is enabled.
+$Script:ScriptBlockPolicyKeys = @(
+  'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging',
+  'HKLM:\SOFTWARE\Wow6432Node\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'
+)
+$Script:ScriptBlockState = $null   # $null = not read (not Windows / not yet checked); the suite seeds it
+
+function Get-ScriptBlockLoggingState {
+  $r = [PSCustomObject]@{ readable = $false; policyOn = $false; channelOn = $false }
+  try {
+    foreach ($k in $Script:ScriptBlockPolicyKeys) {
+      if (Test-Path -LiteralPath $k) {
+        $v = (Get-ItemProperty -LiteralPath $k -Name 'EnableScriptBlockLogging' -ErrorAction SilentlyContinue).EnableScriptBlockLogging
+        if ($v -eq 1) { $r.policyOn = $true }
+      }
+    }
+    $log = Get-WinEvent -ListLog 'Microsoft-Windows-PowerShell/Operational' -ErrorAction Stop
+    $r.channelOn = [bool]$log.IsEnabled
+    $r.readable = $true
+  } catch { }
+  return $r
+}
+
+function Update-ScriptBlockState {
+  if ($Script:ScriptBlockStateTestSeed) { return $Script:ScriptBlockState }
+  $st = Get-ScriptBlockLoggingState
+  if ($st.readable) { $Script:ScriptBlockState = $st } else { $Script:ScriptBlockState = $null }
+  return $Script:ScriptBlockState
+}
+
 # Re-read the live policy. $Script:AuditState = $null means "could not read it"
 # (not elevated, or not Windows) - callers must report 'unknown', never 'blind',
 # so the tool does not cry wolf when it simply cannot see the policy.
 function Update-AuditPreflight {
   $state = Get-AuditPolicyState
   if ($state.Count -gt 0) { $Script:AuditState = $state } else { $Script:AuditState = $null }
+  $null = Update-ScriptBlockState
   $Script:AuditCheckedAt = (Get-Date).ToUniversalTime().ToString("o")
   return $Script:AuditState
 }
@@ -3203,6 +3246,20 @@ function Update-AuditPreflight {
 # unknown = auditpol could not be read
 function Get-RuleAuditState($ruleKey) {
   $map = $RuleAudit[$ruleKey]
+  if ($map -and $map.Policy -eq 'scriptblock') {
+    $label = 'PowerShell Script Block Logging (policy)'
+    $sb = $Script:ScriptBlockState
+    if ($null -eq $sb) {
+      return [PSCustomObject]@{ state = 'unknown'; subcategory = $label; need = 'Enabled'; detail = 'Script Block Logging could not be read - run as Administrator on Windows to check it' }
+    }
+    if ($sb.policyOn -and $sb.channelOn) {
+      return [PSCustomObject]@{ state = 'ok'; subcategory = $label; need = 'Enabled'; detail = 'policy on; Microsoft-Windows-PowerShell/Operational enabled' }
+    }
+    $why = @()
+    if (-not $sb.policyOn) { $why += 'the "Turn on PowerShell Script Block Logging" policy is off' }
+    if (-not $sb.channelOn) { $why += 'the Microsoft-Windows-PowerShell/Operational log is disabled' }
+    return [PSCustomObject]@{ state = 'blind'; subcategory = $label; need = 'Enabled'; detail = (($why -join ' and ') + ' - Windows does not write script block events (4104), so this rule cannot fire.') }
+  }
   if (-not $map -or -not $map.Sub) {
     return [PSCustomObject]@{ state = 'n/a'; subcategory = ''; need = ''; detail = 'not gated by an audit-policy subcategory' }
   }
@@ -3234,6 +3291,11 @@ function Get-PreflightReport {
   $blind = @($rules | Where-Object { $_.auditState -eq 'blind' })
   $fix = @()
   foreach ($r in $blind) {
+    if ($r.key -eq 'powershell_scriptblock') {
+      $fix += 'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" /v EnableScriptBlockLogging /t REG_DWORD /d 1 /f'
+      $fix += 'wevtutil sl Microsoft-Windows-PowerShell/Operational /e:true'
+      continue
+    }
     foreach ($s in @("$($r.auditSubcategory)" -split ' \+ ')) {
       if (-not $s) { continue }
       if ("$($r.auditRequired)" -eq 'Failure') { $fix += 'auditpol /set /subcategory:"' + $s + '" /failure:enable' }
@@ -3314,6 +3376,7 @@ function Get-AuditChangePreview {
   $wanted = @{}
   foreach ($r in $rules) {
     if ($r.auditState -eq 'n/a' -or $r.auditState -eq 'ok') { continue }
+    if ($r.key -eq 'powershell_scriptblock') { continue }
     foreach ($sub in @("$($r.auditSubcategory)" -split ' \+ ')) {
       if (-not $sub) { continue }
       $cur = "$($Script:AuditState[$sub.ToLower()])"
@@ -3339,6 +3402,15 @@ function Get-AuditChangePreview {
       after       = (Get-AuditAfterLabel "$($wanted[$sub].before)" @($wanted[$sub].flags | Select-Object -Unique))
       flags       = @($wanted[$sub].flags | Select-Object -Unique)
       rules       = @($wanted[$sub].rules | Select-Object -Unique)
+    }
+  }
+  if ((Get-RuleAuditState 'powershell_scriptblock').state -eq 'blind') {
+    $changes += [PSCustomObject]@{
+      subcategory = 'PowerShell Script Block Logging (policy)'
+      before      = 'Off'
+      after       = 'On'
+      flags       = @('policy')
+      rules       = @('powershell_scriptblock')
     }
   }
   return @($changes | Sort-Object subcategory)
@@ -3371,6 +3443,29 @@ function Test-ProcessElevated {
   return (Test-SentinelIsAdmin)
 }
 
+# Turns on PowerShell Script Block Logging: the policy value (same one the Group Policy
+# writes) plus the Operational channel. Additive only; the previous value is logged.
+function Enable-ScriptBlockLogging {
+  $key = $Script:ScriptBlockPolicyKeys[0]
+  try {
+    $before = $null
+    if (Test-Path -LiteralPath $key) { $before = (Get-ItemProperty -LiteralPath $key -Name 'EnableScriptBlockLogging' -ErrorAction SilentlyContinue).EnableScriptBlockLogging }
+    if (-not (Test-Path -LiteralPath $key)) { $null = New-Item -Path $key -Force }
+    $null = New-ItemProperty -LiteralPath $key -Name 'EnableScriptBlockLogging' -Value 1 -PropertyType DWord -Force
+    & wevtutil.exe sl 'Microsoft-Windows-PowerShell/Operational' /e:true 2>$null
+    $beforeText = if ($null -eq $before) { 'not set' } else { "$before" }
+    Write-Host ("  PowerShell Script Block Logging".PadRight(39) + "| " + $beforeText.PadRight(20) + "| On") 
+    Write-AuditChange 'PowerShell Script Block Logging (policy)' $beforeText 'On' ''
+    if ($Script:AuditChangeCaller) {
+      Write-AuthEvent $Script:AuditChangeCallerIp $Script:AuditChangeCaller 'success' 'PowerShell Script Block Logging enabled'
+    }
+    return $true
+  } catch {
+    Write-Host ("  [audit] could not enable PowerShell Script Block Logging: " + $_.Exception.Message) -ForegroundColor Red
+    return $false
+  }
+}
+
 function Enable-SentinelAuditPolicy {
   # requires Administrator - auditpol /set fails without it, and half-applied
   # audit policies are worse than none
@@ -3399,6 +3494,7 @@ function Enable-SentinelAuditPolicy {
   $wanted = @{}   # subcategory -> flag ('/success:enable' and/or '/failure:enable')
   foreach ($r in $rules) {
     if ($r.auditState -eq 'n/a' -or $r.auditState -eq 'ok') { continue }
+    if ($r.key -eq 'powershell_scriptblock') { continue }
     foreach ($sub in @("$($r.auditSubcategory)" -split ' \+ ')) {
       if (-not $sub) { continue }
       $cur = "$($Script:AuditState[$sub.ToLower()])"
@@ -3413,7 +3509,8 @@ function Enable-SentinelAuditPolicy {
       }
     }
   }
-  if ($wanted.Count -eq 0) {
+  $sbBlind = ((Get-RuleAuditState 'powershell_scriptblock').state -eq 'blind')
+  if ($wanted.Count -eq 0 -and -not $sbBlind) {
     Write-Host "  [audit] nothing to change - every subcategory the rules need is already enabled." -ForegroundColor Green
     return $true
   }
@@ -3446,7 +3543,10 @@ function Enable-SentinelAuditPolicy {
       Write-AuthEvent $Script:AuditChangeCallerIp $Script:AuditChangeCaller 'success' ("audit policy set: " + $sub + " -> " + $after)
     }
   }
-  Write-Host ("  [audit] " + $changed + " subcategory(ies) updated (only enabled; nothing was ever turned off).") -ForegroundColor Green
+  if ($sbBlind) {
+    if (Enable-ScriptBlockLogging) { $changed++ }
+  }
+  Write-Host ("  [audit] " + $changed + " setting(s) updated (only enabled; nothing was ever turned off).") -ForegroundColor Green
   # 4. re-read so coverage and health update immediately, no restart
   $null = Update-AuditPreflight
   return $true
@@ -4268,11 +4368,16 @@ function Get-RuleBasedBotAnswer([string]$Question) {
     if ($q -match 'critical|high|medium|low') {
         $answer += "Active alerts: $activeCount total ($criticalCount critical, $highCount high).`n"
     }
-    if ($q -match 'rules|family|blind|unverified') {
+    if ($q -match 'rules|family|blind|unverified|working|coverage|audit|verify|health') {
         $ruleCount = $rules.Count
-        $blindCount = @($rules | Where-Object { $_.auditState -eq 'blind' }).Count
+        $blindRules = @($rules | Where-Object { $_.auditState -eq 'blind' })
+        $blindCount = $blindRules.Count
         $unknownCount = @($rules | Where-Object { $_.auditState -eq 'unknown' }).Count
         $answer += "Detection coverage: $ruleCount families ($blindCount blind, $unknownCount unverified)`n"
+        foreach ($br in ($blindRules | Select-Object -First 8)) {
+            $answer += "- Blind: $($br.title) (needs audit subcategory '$($br.auditSubcategory)')`n"
+        }
+        if ($blindCount -gt 0) { $answer += "Fix blind rules in Settings > Audit.`n" }
     }
     if ($q -match 'chain|attack path') {
         $answer += "Attack chains are built from alerts sharing an account or source IP within a 60-minute window.`n"
@@ -4298,90 +4403,225 @@ function Get-RuleBasedBotAnswer([string]$Question) {
     return $answer
 }
 
-# Gemini AI bot answer (enhances rule-based answer with AI when key is configured)
-function Get-GeminiBotAnswer([string]$Question) {
-    $alerts = $Script:Alerts
-    $rules = @(Get-RuleCatalog)
-    $chains = @(Get-AttackChains)
+# ---- AI ASSISTANT (Wolf) ---------------------------------------------------
+# Optional AI answers for the Wolf bot. Providers: 'gemini' (Google AI Studio) or
+# 'openai' (any OpenAI-compatible service such as FreeLLMAPI, OpenRouter, Ollama).
+# The key lives in sentinel-gemini.key, the NON-secret settings (provider, base
+# URL, model) in sentinel-ai.json. The key is only ever sent in a request header,
+# never in a URL, never logged and never returned by any API.
+$Script:AiDefaultModel = 'gemini-3.1-flash-lite'
+$Script:AiStaticModels = @('gemini-3.1-flash-lite', 'gemini-3.1-flash-lite-preview', 'gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest')
 
-    # Build compact JSON summary of current state
-    $activeAlerts = @($alerts | Where-Object { -not $_.SelfTest -and ($_.Status -eq 'New' -or $_.Status -eq 'Investigating' -or -not $_.Status) })
-    $severityCounts = @{}
-    foreach ($a in $activeAlerts) {
-        $sev = "$($a.Severity)"
-        if (-not $severityCounts.ContainsKey($sev)) { $severityCounts[$sev] = 0 }
-        $severityCounts[$sev]++
+function Get-AiKeyPath { if ($PSScriptRoot) { Join-Path $PSScriptRoot 'sentinel-gemini.key' } else { 'sentinel-gemini.key' } }
+function Get-AiSettingsPath { if ($PSScriptRoot) { Join-Path $PSScriptRoot 'sentinel-ai.json' } else { 'sentinel-ai.json' } }
+
+function Test-AiModelName([string]$Model) { return [bool]($Model -match '^[A-Za-z0-9._:/-]{3,100}$') }
+# any printable, space-free string of 20-300 characters (new Google keys can contain a dot)
+function Test-AiApiKey([string]$Key) { return [bool]($Key -match '^[\x21-\x7E]{20,300}$') }
+function Test-AiBaseUrl([string]$Url) {
+  $u = $null
+  if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$u)) { return $false }
+  return ($u.Scheme -eq 'http' -or $u.Scheme -eq 'https') -and [bool]$u.Host
+}
+
+function Hide-AiSecret([string]$Text, [string]$Key) {
+  if ($Key -and $Key.Length -ge 8) { $Text = $Text.Replace($Key, '***') }
+  return $Text
+}
+
+function Get-AiKey {
+  try {
+    $p = Get-AiKeyPath
+    if (-not (Test-Path $p)) { return '' }
+    return ("$(Get-Content -Raw $p -ErrorAction Stop)").Trim()
+  } catch { return '' }
+}
+
+function Get-AiSettings {
+  $s = [PSCustomObject]@{ provider = 'gemini'; baseUrl = ''; model = $Script:AiDefaultModel }
+  try {
+    $p = Get-AiSettingsPath
+    if (Test-Path $p) {
+      $j = Get-Content -Raw $p -ErrorAction Stop | ConvertFrom-Json
+      if ($j.provider -eq 'openai' -or $j.provider -eq 'gemini') { $s.provider = "$($j.provider)" }
+      if ($j.baseUrl -and (Test-AiBaseUrl "$($j.baseUrl)")) { $s.baseUrl = "$($j.baseUrl)" }
+      if ($j.model -and (Test-AiModelName "$($j.model)")) { $s.model = "$($j.model)" }
     }
-    $recentAlerts = @($activeAlerts | Sort-Object { [DateTime]$_.Time } -Descending | Select-Object -First 5 | ForEach-Object {
-        @{
-            title = $_.Title
-            severity = $_.Severity
-            host = $_.Host
-            account = $_.Account
-            time = $_.Time
-        }
-    })
+  } catch { }
+  if ($s.provider -eq 'openai' -and -not $s.baseUrl) { $s.provider = 'gemini' }
+  return $s
+}
 
-    $ruleCount = $rules.Count
-    $blindCount = @($rules | Where-Object { $_.auditState -eq 'blind' }).Count
-    $unknownCount = @($rules | Where-Object { $_.auditState -eq 'unknown' }).Count
-    $coverage = if ($ruleCount -gt 0) { [int][Math]::Round((100.0 * ($ruleCount - $blindCount - $unknownCount)) / $ruleCount) } else { 0 }
-
-    $stateSummary = @{
-        alertCounts = $severityCounts
-        recentAlerts = $recentAlerts
-        ruleCoverage = @{
-            total = $ruleCount
-            blind = $blindCount
-            unverified = $unknownCount
-            percent = $coverage
-        }
-        chainCount = $chains.Count
+# Only Administrators and SYSTEM may read a file that holds (or points to) a key.
+function Set-AiFileAcl([string]$Path) {
+  try {
+    if ($env:OS -eq 'Windows_NT' -and (Test-Path $Path)) {
+      & icacls $Path /inheritance:r /grant:r '*S-1-5-32-544:(F)' '*S-1-5-18:(F)' 2>&1 | Out-Null
     }
+  } catch { }
+}
 
-    $geminiKeyFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }
-    $geminiKey = Get-Content -Raw (if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }) -ErrorAction SilentlyContinue
-    if (-not $geminiKey) { return $null }
+function Save-AiSettings([string]$Provider, [string]$BaseUrl, [string]$Model) {
+  $p = Get-AiSettingsPath
+  $obj = [ordered]@{ provider = $Provider; baseUrl = $BaseUrl; model = $Model }
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($p, ($obj | ConvertTo-Json), $enc)
+  Set-AiFileAcl $p
+}
 
-    $prompt = @"
-You are Wolf, the Alpha Sentinel AI assistant for Active Directory security monitoring.
-You answer questions about this dashboard's alerts, detection coverage, rules, and attack chains.
-Use ONLY the data provided below. Do not invent AD facts not present in this data.
-If you cannot answer from the data, say you don't know.
+function Set-AiTls {
+  # Windows Server 2012 R2 / PowerShell 5.1 negotiates TLS 1.0 by default, which Google refuses
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+}
 
-CURRENT STATE:
-$($stateSummary | ConvertTo-Json -Depth 5)
+# One readable line from a failed web call, with the key removed.
+function Get-AiErrorText($Err, [string]$Key) {
+  $msg = ''
+  $code = ''
+  try { if ($Err.ErrorDetails -and $Err.ErrorDetails.Message) { $msg = "$($Err.ErrorDetails.Message)" } } catch { }
+  try {
+    $resp = $Err.Exception.Response
+    if ($resp) {
+      $code = 'HTTP ' + [int]$resp.StatusCode + ': '
+      if (-not $msg) {
+        try { $sr = New-Object System.IO.StreamReader($resp.GetResponseStream()); $msg = $sr.ReadToEnd() } catch { }
+      }
+    }
+  } catch { }
+  try { $j = $msg | ConvertFrom-Json; if ($j.error.message) { $msg = "$($j.error.message)" } } catch { }
+  if (-not $msg) { $msg = "$($Err.Exception.Message)" }
+  $t = ($code + $msg) -replace '\s+', ' '
+  if ($t.Length -gt 300) { $t = $t.Substring(0, 300) }
+  return (Hide-AiSecret $t $Key)
+}
 
-USER QUESTION: $Question
+# Returns @{ ok; text; error }. Never throws, never exposes the key.
+function Invoke-AiRequest([string]$Prompt, $Settings, [string]$Key, [int]$TimeoutSec = 30) {
+  if (-not $Key) { return [PSCustomObject]@{ ok = $false; text = ''; error = 'no API key is saved' } }
+  Set-AiTls
+  try {
+    if ($Settings.provider -eq 'openai') {
+      $url = ($Settings.baseUrl.TrimEnd('/')) + '/chat/completions'
+      $body = @{ model = $Settings.model; messages = @(@{ role = 'user'; content = $Prompt }) } | ConvertTo-Json -Depth 6
+      $r = Invoke-RestMethod -Uri $url -Method Post -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json; charset=utf-8' -TimeoutSec $TimeoutSec -Headers @{ Authorization = "Bearer $Key" }
+      $text = "$($r.choices[0].message.content)".Trim()
+    } else {
+      $url = 'https://generativelanguage.googleapis.com/v1beta/models/' + $Settings.model + ':generateContent'
+      $body = @{ contents = @(@{ parts = @(@{ text = $Prompt }) }); generationConfig = @{ temperature = 0.3; maxOutputTokens = 800 } } | ConvertTo-Json -Depth 8
+      $r = Invoke-RestMethod -Uri $url -Method Post -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json; charset=utf-8' -TimeoutSec $TimeoutSec -Headers @{ 'x-goog-api-key' = $Key }
+      $text = "$($r.candidates[0].content.parts[0].text)".Trim()
+    }
+    if (-not $text) { return [PSCustomObject]@{ ok = $false; text = ''; error = 'the AI returned no answer text (blocked or empty response)' } }
+    return [PSCustomObject]@{ ok = $true; text = $text; error = '' }
+  } catch {
+    return [PSCustomObject]@{ ok = $false; text = ''; error = (Get-AiErrorText $_ $Key) }
+  }
+}
 
-Answer concisely as Wolf, the AD security assistant. Focus on actionable insights from the data.
+# Models the saved key can use. Falls back to a short static list.
+function Get-AiModelChoices($Settings, [string]$Key) {
+  $names = @()
+  if ($Key) {
+    Set-AiTls
+    try {
+      if ($Settings.provider -eq 'openai') {
+        $r = Invoke-RestMethod -Uri (($Settings.baseUrl.TrimEnd('/')) + '/models') -Method Get -TimeoutSec 10 -Headers @{ Authorization = "Bearer $Key" }
+        $names = @($r.data | ForEach-Object { "$($_.id)" })
+      } else {
+        $r = Invoke-RestMethod -Uri 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=200' -Method Get -TimeoutSec 10 -Headers @{ 'x-goog-api-key' = $Key }
+        $names = @($r.models | Where-Object { $_.supportedGenerationMethods -contains 'generateContent' } |
+          ForEach-Object { ("$($_.name)" -replace '^models/', '') } | Where-Object { $_ -like 'gemini*' })
+      }
+    } catch { $names = @() }
+  }
+  $names = @($names | Where-Object { $_ -and (Test-AiModelName $_) } | Sort-Object -Unique -Descending)
+  if ($names.Count -eq 0) { $names = @($Script:AiStaticModels) }
+  if ($names -notcontains $Settings.model) { $names = @($Settings.model) + $names }
+  return $names
+}
+
+$Script:AiSystemPrompt = @"
+You are Wolf, the built-in assistant of Alpha Sentinel, an Active Directory attack detector for Windows. You are not Gemini or any other product; if asked, you are Wolf. Use ONLY the DATA section for facts about this environment.
+- Zero alerts does not mean a rule is broken: say so, and use the coverage and poller lines to say whether real events can arrive.
+- To judge "are the rules working", combine: audit-policy coverage (working / blind / unverified), whether the poller is current, and alerts fired per rule.
+- For blind rules, name the rule, the missing Windows audit subcategory and the fix from DATA.
+- For fixes or attack tests, give short concrete steps. Never invent alerts, hosts, accounts or numbers.
+- Be concise: a short paragraph or a short list. Plain text, no markdown headings.
 "@
 
-    try {
-        $body = @{
-            contents = @(
-                @{
-                    parts = @(
-                        @{ text = $prompt }
-                    )
-                }
-            )
-            generationConfig = @{
-                temperature = 0.3
-                maxOutputTokens = 500
-            }
-        }
-        $json = $body | ConvertTo-Json -Depth 10
-        $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$geminiKey"
-        $response = Invoke-RestMethod -Uri $url -Method Post -Body $json -ContentType "application/json" -TimeoutSec 8
-        if ($response.candidates -and $response.candidates[0].content.parts[0].text) {
-            return $response.candidates[0].content.parts[0].text.Trim()
-        }
-    } catch {
-        # Log failure server-side only
-        Write-Host "  [bot] Gemini API error: $($_.Exception.Message)" -ForegroundColor DarkYellow
+# Compact, factual snapshot of the live state for the AI prompt.
+function Get-AiContext {
+  $lines = @()
+  $alerts = @($Script:Alerts | Where-Object { -not $_.SelfTest })
+  $open = @($alerts | Where-Object { $_.Status -eq 'New' -or $_.Status -eq 'Investigating' -or -not $_.Status })
+  $sev = @('Critical', 'High', 'Medium', 'Low') | ForEach-Object { $n = $_; "$n=" + @($open | Where-Object { $_.Severity -eq $n }).Count }
+  $lines += "Open alerts: $($open.Count) of $($alerts.Count) total (" + ($sev -join ', ') + ")."
+  $hostNames = @($alerts | ForEach-Object { "$($_.Host)" } | Where-Object { $_ } | Sort-Object -Unique)
+  $lines += "Hosts with alerts: " + $(if ($hostNames.Count) { $hostNames -join ', ' } else { 'none' })
+  try {
+    $rules = @(Get-RuleCatalog)
+    $blind = @($rules | Where-Object { $_.auditState -eq 'blind' })
+    $unk = @($rules | Where-Object { $_.auditState -eq 'unknown' })
+    $ok = $rules.Count - $blind.Count - $unk.Count
+    $lines += "Rule coverage: $($rules.Count) rule families, $ok working, $($blind.Count) blind, $($unk.Count) unverified."
+    foreach ($b in ($blind | Select-Object -First 10)) {
+      $lines += "BLIND: $($b.title) - needs audit subcategory '$($b.auditSubcategory)' ($($b.auditRequired)). $($b.auditDetail)"
     }
-    return $null
+    $fired = @($rules | Where-Object { $_.fired -gt 0 } | ForEach-Object { "$($_.key)=$($_.fired)" })
+    $lines += "Alerts fired per rule: " + $(if ($fired.Count) { $fired -join ', ' } else { 'none yet' })
+  } catch { $lines += 'Rule coverage: unavailable' }
+  try {
+    $lag = 0
+    foreach ($c in @($Script:ChannelMarks.Keys)) {
+      $l = [int][Math]::Round(((Get-Date) - $Script:ChannelMarks[$c]).TotalSeconds)
+      if ($l -gt $lag) { $lag = $l }
+    }
+    $errs = @($Script:ChannelLastError.Keys | Where-Object { $Script:ChannelLastError[$_] } | ForEach-Object { "$_ : $($Script:ChannelLastError[$_])" })
+    $lines += "Poller: max lag $lag s" + $(if ($lag -gt 120) { ' (behind)' } else { ' (current)' }) + $(if ($errs.Count) { '; channel errors: ' + ($errs -join '; ') } else { '' })
+  } catch { }
+  $lines += 'Latest open alerts:'
+  $latest = @($open | Sort-Object { [string]$_.Time } -Descending | Select-Object -First 15)
+  if ($latest.Count -eq 0) { $lines += '- none' }
+  foreach ($a in $latest) {
+    $d = ("$($a.Description)" -replace '\s+', ' ')
+    if ($d.Length -gt 200) { $d = $d.Substring(0, 200) }
+    $lines += "- #$($a.Id) [$($a.Severity)] $($a.Title) | account=$($a.Account) host=$($a.Host) | $d"
+  }
+  return ($lines -join "`n")
+}
+
+function Get-AiPrompt([string]$Question, [string]$Context, $History = @()) {
+  $h = ''
+  $turns = @($History | Where-Object { $_ })
+  if ($turns.Count -gt 0) {
+    $h = "`n`nCONVERSATION SO FAR (oldest first; for context only):`n" + ((@($turns | ForEach-Object {
+      $who = if ("$($_.role)" -eq 'user') { 'Admin' } else { 'Wolf' }
+      "${who}: $($_.text)"
+    })) -join "`n")
+  }
+  return ($Script:AiSystemPrompt + "`n`nDATA:`n" + $Context + $h + "`n`nQUESTION: " + $Question)
+}
+
+# Keep only well-formed recent turns from the browser: last 6, roles user/assistant, 500 chars each.
+function Get-AiHistory($Raw) {
+  $out = @()
+  foreach ($t in @($Raw | Select-Object -Last 6)) {
+    if ($t -and ("$($t.role)" -eq 'user' -or "$($t.role)" -eq 'assistant') -and $t.text -is [string]) {
+      $tx = $t.text
+      if ($tx.Length -gt 500) { $tx = $tx.Substring(0, 500) }
+      $out += [PSCustomObject]@{ role = "$($t.role)"; text = $tx }
+    }
+  }
+  return $out
+}
+
+# AI-enhanced answer: returns @{ ok; text; error }. Used by /api/bot/ask, which falls
+# back to the rule-based answer (and shows the reason) when ok is false.
+function Get-AiBotAnswer([string]$Question, $History = @()) {
+  $key = Get-AiKey
+  $settings = Get-AiSettings
+  $prompt = Get-AiPrompt $Question (Get-AiContext) $History
+  return (Invoke-AiRequest $prompt $settings $key 30)
 }
 
 # ============================================================================
@@ -4472,6 +4712,8 @@ $Script:StaticFiles = @{
   '/js/state.js'    = @{ file = 'js/state.js';    type = 'application/javascript; charset=utf-8' }
   '/js/ui.js'       = @{ file = 'js/ui.js';       type = 'application/javascript; charset=utf-8' }
   '/js/router.js'   = @{ file = 'js/router.js';   type = 'application/javascript; charset=utf-8' }
+  '/js/wolf-store.js' = @{ file = 'js/wolf-store.js'; type = 'application/javascript; charset=utf-8' }
+  '/js/pages/wolf.js' = @{ file = 'js/pages/wolf.js'; type = 'application/javascript; charset=utf-8' }
   '/js/app.js'      = @{ file = 'js/app.js';      type = 'application/javascript; charset=utf-8' }
   '/js/pages/overview.js' = @{ file = 'js/pages/overview.js'; type = 'application/javascript; charset=utf-8' }
   '/js/pages/alerts.js'   = @{ file = 'js/pages/alerts.js';   type = 'application/javascript; charset=utf-8' }
@@ -4715,20 +4957,18 @@ function Invoke-Handler($ctx) {
                             Send-Json $res '{"error":"Too many attempts from this address. Try again in a few minutes."}' 429
                             return
                           }
-                          # Get the rule-based answer (existing logic)
-                          $answer = Get-RuleBasedBotAnswer $body.question
-                          # If Gemini key is configured, try to enhance with AI
-                          $geminiKeyFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }
-                          if (Test-Path $geminiKeyFile) {
-                            try {
-                              $geminiKey = Get-Content -Raw $geminiKeyFile -ErrorAction Stop
-                              if ($geminiKey) {
-                                $enhanced = Get-GeminiBotAnswer $body.question
-                                if ($enhanced) { $answer = $enhanced }
-                              }
-                            } catch {
-                              # Log failure server-side only, fall back to rule-based answer
-                              Write-Host "  [bot] Gemini API error: $($_.Exception.Message)" -ForegroundColor DarkYellow
+                          $question = "$($body.question)"
+                          if ($question.Length -gt 500) { $question = $question.Substring(0, 500) }
+                          # Rule-based answer first; when a key is saved the AI answers instead, and when the
+                          # AI fails the built-in answer is shown together with the (key-free) reason.
+                          $answer = Get-RuleBasedBotAnswer $question
+                          if (Get-AiKey) {
+                            $ai = Get-AiBotAnswer $question (Get-AiHistory $body.history)
+                            if ($ai.ok) {
+                              $answer = $ai.text
+                            } else {
+                              Write-Host "  [bot] AI error: $($ai.error)" -ForegroundColor DarkYellow
+                              $answer = $answer + "`n`n(The AI did not answer, so this is the built-in answer. Reason: $($ai.error))"
                             }
                           }
                           Send-Json $res (@{ ok = $true; answer = $answer } | ConvertTo-Json)
@@ -5410,12 +5650,38 @@ function Invoke-Handler($ctx) {
         $me = Get-SessionUser $ctx
         $body = $bodyParsed
         $apiKey = if ($body -and $null -ne $body.apiKey) { "$($body.apiKey)" } else { '' }
+        $apiKey = $apiKey.Trim()
         if (-not $apiKey) { Send-Json $res '{"error":"API key is required."}' 400; return }
-        $geminiKeyFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "sentinel-gemini.key" } else { "sentinel-gemini.key" }
-        $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-        [System.IO.File]::WriteAllText($geminiKeyFile, $apiKey, $utf8Bom)
+        if (-not (Test-AiApiKey $apiKey)) { Send-Json $res '{"error":"That does not look like an API key (no spaces, 20-300 characters)."}' 400; return }
+        $geminiKeyFile = Get-AiKeyPath
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($geminiKeyFile, $apiKey, $utf8NoBom)
+        Set-AiFileAcl $geminiKeyFile
         Write-AuthEvent $clientIp $me 'success' 'Gemini API key updated'
         Send-Json $res (@{ ok = $true; keySet = $true } | ConvertTo-Json)
+      }
+      '^/api/settings/gemini-model$' {
+        if ($method -eq 'GET') {
+          $st = Get-AiSettings
+          $choices = @(Get-AiModelChoices $st (Get-AiKey))
+          Send-Json $res (@{ model = $st.model; choices = $choices; provider = $st.provider; baseUrl = $st.baseUrl } | ConvertTo-Json -Depth 4)
+          return
+        }
+        if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed."}' 405; return }
+        if (-not (Test-SameOrigin $ctx)) { Send-Json $res '{"error":"Cross-origin request refused."}' 403; return }
+        $me = Get-SessionUser $ctx
+        $body = $bodyParsed
+        $model = if ($body -and $null -ne $body.model) { "$($body.model)".Trim() } else { '' }
+        $provider = if ($body -and $null -ne $body.provider) { "$($body.provider)" } else { 'gemini' }
+        $baseUrl = if ($body -and $null -ne $body.baseUrl) { "$($body.baseUrl)".Trim() } else { '' }
+        if (-not (Test-AiModelName $model)) { Send-Json $res '{"error":"Model name may contain only letters, digits and . _ : / -"}' 400; return }
+        if ($provider -ne 'gemini' -and $provider -ne 'openai') { Send-Json $res '{"error":"Unknown provider."}' 400; return }
+        if ($provider -eq 'openai') {
+          if (-not (Test-AiBaseUrl $baseUrl)) { Send-Json $res '{"error":"Base URL must start with http:// or https:// (for example https://host/v1)."}' 400; return }
+        } else { $baseUrl = '' }
+        Save-AiSettings $provider $baseUrl $model
+        Write-AuthEvent $clientIp $me 'success' "AI settings updated (provider $provider, model $model)"
+        Send-Json $res (@{ ok = $true; model = $model } | ConvertTo-Json)
       }
       '^/api/settings/gemini-key/clear$' {
         if ($method -ne 'POST') { Send-Json $res '{"error":"Method not allowed - POST only."}' 405; return }

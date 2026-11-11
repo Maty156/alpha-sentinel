@@ -1358,6 +1358,9 @@ try {
     foreach ($rk in $RuleAudit.Keys) {
       foreach ($sn in @($RuleAudit[$rk].Sub)) { if ($sn) { $subs["$sn".ToLower()] = 'Success and Failure' } }
     }
+    # the Script Block Logging policy is read separately from auditpol: seed it enabled too
+    $Script:ScriptBlockStateTestSeed = $true
+    $Script:ScriptBlockState = [PSCustomObject]@{ readable = $true; policyOn = $true; channelOn = $true }
     return ,$subs
   }
   $readableSubs = New-ReadableAuditState
@@ -2093,8 +2096,8 @@ try {
   $cat = @(Get-RuleCatalog)
   $defenderRules = @($cat | Where-Object { @($_.eventIds) -contains 5001 })
   Assert-True ($defenderRules.Count -ge 1) 'the Defender-only rule family is in the catalog'
-  Assert-True ($defenderRules[0].auditState -eq 'unknown') 'a rule whose every channel is unavailable is unverified'
-  Assert-True ("$($defenderRules[0].auditDetail)" -like 'log not present*') 'with the log-not-present detail'
+  Assert-True ($defenderRules[0].auditState -eq 'unsupported') 'a Defender rule whose log is absent is unsupported, not unverified'
+  Assert-True ("$($defenderRules[0].auditDetail)" -like '*not installed*') 'with the Defender-not-installed detail'
   $script:FakeMissingChannels = @()
 
   # --- a REAL failure still counts ------------------------------------------
@@ -2557,6 +2560,93 @@ exit 1
     Assert-True ($outText -match '-TimeoutSec \$Script:AlertOutputTimeoutSec') 'webhook has an explicit timeout'
   }
 
+  # ---- PowerShell Script Block Logging is a policy, not an auditpol subcategory ----
+  Write-Host "== script block logging coverage =="
+  $sbSaveAudit = $Script:AuditState; $sbSaveSeed = $Script:AuditStateTestSeed
+  $sbSaveState = $Script:ScriptBlockState; $sbSaveSbSeed = $Script:ScriptBlockStateTestSeed
+  try {
+    $Script:AuditState = @{ 'logon' = 'Success' }
+    $Script:AuditStateTestSeed = $true
+    $Script:ScriptBlockStateTestSeed = $true
+    $Script:ScriptBlockState = [PSCustomObject]@{ readable = $true; policyOn = $false; channelOn = $true }
+    $sbOff = Get-RuleAuditState 'powershell_scriptblock'
+    Assert-True ($sbOff.state -eq 'blind' -and $sbOff.detail -match 'policy is off') 'script block logging: policy off is blind and says why'
+    $Script:ScriptBlockState = [PSCustomObject]@{ readable = $true; policyOn = $true; channelOn = $false }
+    $sbCh = Get-RuleAuditState 'powershell_scriptblock'
+    Assert-True ($sbCh.state -eq 'blind' -and $sbCh.detail -match 'Operational log is disabled') 'script block logging: disabled channel is blind and says why'
+    $Script:ScriptBlockState = [PSCustomObject]@{ readable = $true; policyOn = $true; channelOn = $true }
+    Assert-True ((Get-RuleAuditState 'powershell_scriptblock').state -eq 'ok') 'script block logging: policy on + channel enabled is ok'
+    $Script:ScriptBlockState = $null
+    Assert-True ((Get-RuleAuditState 'powershell_scriptblock').state -eq 'unknown') 'script block logging: unreadable is unknown, never blind'
+    Assert-True ($RuleAudit['powershell_scriptblock'].Sub -eq $null) 'script block logging is no longer mapped to a made-up auditpol subcategory'
+    $Script:ScriptBlockState = [PSCustomObject]@{ readable = $true; policyOn = $false; channelOn = $false }
+    $sbRep = Get-PreflightReport
+    Assert-True (@($sbRep.fix | Where-Object { $_ -match 'EnableScriptBlockLogging' }).Count -eq 1 -and @($sbRep.fix | Where-Object { $_ -match 'PowerShell Script Block' }).Count -eq 0) 'preflight fix: registry command for script block logging, no bogus auditpol line'
+    $sbPrev = @(Get-AuditChangePreview)
+    Assert-True (@($sbPrev | Where-Object { $_.rules -contains 'powershell_scriptblock' -and $_.after -eq 'On' }).Count -eq 1) 'audit preview lists turning script block logging on'
+  } finally {
+    $Script:AuditState = $sbSaveAudit; $Script:AuditStateTestSeed = $sbSaveSeed
+    $Script:ScriptBlockState = $sbSaveState; $Script:ScriptBlockStateTestSeed = $sbSaveSbSeed
+  }
+
+  # ---- Wolf AI assistant: settings validation, key safety, prompt, route wiring ----
+  Write-Host "== wolf ai assistant =="
+  Assert-True (Test-AiApiKey ('AQ.Ab8RN6' + ('x' * 40))) 'AI key: a new-style key containing a dot is accepted'
+  Assert-True (-not (Test-AiApiKey 'has a space in it 1234567890')) 'AI key: spaces are rejected'
+  Assert-True (-not (Test-AiApiKey 'short')) 'AI key: too-short keys are rejected'
+  Assert-True (Test-AiModelName 'gemini-3.1-flash-lite') 'AI model: a normal model id is accepted'
+  Assert-True (-not (Test-AiModelName 'bad model!')) 'AI model: spaces and punctuation are rejected'
+  Assert-True (Test-AiBaseUrl 'https://example.test/v1') 'AI base URL: https is accepted'
+  Assert-True (-not (Test-AiBaseUrl 'ftp://example.test')) 'AI base URL: other schemes are rejected'
+  Assert-True (-not (Test-AiBaseUrl 'not a url')) 'AI base URL: garbage is rejected'
+  $secretKey = 'AIzaSyEXAMPLEKEY1234567890abcdef'
+  Assert-True ((Hide-AiSecret "request failed for key $secretKey here" $secretKey) -notmatch 'EXAMPLEKEY') 'the API key is redacted from error text'
+  # settings round trip in a throw-away folder
+  $aiTmp = Join-Path ([IO.Path]::GetTempPath()) ('ai-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $aiTmp | Out-Null
+  try {
+    function Get-AiSettingsPath { Join-Path $aiTmp 'sentinel-ai.json' }
+    function Get-AiKeyPath { Join-Path $aiTmp 'sentinel-gemini.key' }
+    $d = Get-AiSettings
+    Assert-True ($d.provider -eq 'gemini' -and $d.model -eq 'gemini-3.1-flash-lite') 'AI settings default to Gemini and the free-tier model'
+    Save-AiSettings 'openai' 'https://example.test/v1' 'some-model'
+    $r = Get-AiSettings
+    Assert-True ($r.provider -eq 'openai' -and $r.baseUrl -eq 'https://example.test/v1' -and $r.model -eq 'some-model') 'AI settings round trip through sentinel-ai.json'
+    Set-Content -Path (Get-AiSettingsPath) -Value '{ "provider": "openai", "baseUrl": "nonsense", "model": "x y" }'
+    $bad = Get-AiSettings
+    Assert-True ($bad.provider -eq 'gemini' -and $bad.model -eq 'gemini-3.1-flash-lite') 'a hand-edited, invalid sentinel-ai.json falls back to safe defaults'
+    Assert-True ((Get-AiKey) -eq '') 'no key file means no key'
+    Set-Content -Path (Get-AiKeyPath) -Value ($secretKey + "`r`n")
+    Assert-True ((Get-AiKey) -eq $secretKey) 'the key is read back trimmed'
+    $noKey = Invoke-AiRequest 'hi' $d '' 5
+    Assert-True ((-not $noKey.ok) -and $noKey.error -match 'no API key') 'a request without a key fails cleanly'
+    # an unreachable server: the failure text must not contain the key
+    $dead = [PSCustomObject]@{ provider = 'openai'; baseUrl = 'http://127.0.0.1:9/v1'; model = 'm' }
+    $aiDeadRes = Invoke-AiRequest 'hi' $dead $secretKey 3
+    Assert-True ((-not $aiDeadRes.ok) -and $aiDeadRes.error -and $aiDeadRes.error -notmatch 'EXAMPLEKEY') 'a failed AI call returns a reason that never contains the key'
+    $choices = @(Get-AiModelChoices $d '')
+    Assert-True ($choices -contains 'gemini-3.1-flash-lite' -and $choices.Count -ge 3) 'without a key the model list is the static free-tier list'
+  } finally {
+    Remove-Item $aiTmp -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  # prompt + context come from live state and keep Wolf in character
+  $ctxText = Get-AiContext
+  Assert-True ($ctxText -match 'Open alerts:' -and $ctxText -match 'Rule coverage:' -and $ctxText -match 'Latest open alerts:') 'the AI context carries alerts, coverage and the latest alerts'
+  $pr = Get-AiPrompt 'are the rules working?' $ctxText
+  Assert-True ($pr -match 'You are Wolf' -and $pr -match 'not Gemini' -and $pr -match 'QUESTION: are the rules working\?') 'the prompt keeps Wolf in character and carries the question'
+  $hh = @(Get-AiHistory @([PSCustomObject]@{ role = 'user'; text = 'hello there' }, [PSCustomObject]@{ role = 'assistant'; text = 'hi admin' }, [PSCustomObject]@{ role = 'evil'; text = 'x' }, [PSCustomObject]@{ role = 'user'; text = 5 }))
+  Assert-True ($hh.Count -eq 2 -and $hh[0].role -eq 'user' -and $hh[1].role -eq 'assistant') 'conversation history keeps only well-formed user/assistant turns'
+  $prh = Get-AiPrompt 'and now?' $ctxText $hh
+  Assert-True ($prh -match 'CONVERSATION SO FAR' -and $prh -match 'Admin: hello there' -and $prh -match 'Wolf: hi admin') 'earlier turns reach the prompt'
+  $rb = Get-RuleBasedBotAnswer 'are all the rules working?'
+  Assert-True ($rb -match 'Detection coverage') 'the built-in answer covers "are the rules working"'
+  # route wiring (static): routes exist, the key never goes in a URL, never returned
+  $webAi = Get-Section $raw $mWeb $mProbes
+  Assert-True ($webAi.Contains("'^/api/settings/gemini-model$'")) 'the gemini-model route exists'
+  Assert-True ($raw -match 'x-goog-api-key' -and $raw -notmatch '\?key=\$') 'the key is sent in a header, never in the URL'
+  Assert-True ($raw -notmatch 'Get-GeminiBotAnswer') 'the old URL-key Gemini function is gone'
+  Assert-True ($webAi -notmatch 'keySet = \$true; key') 'no route returns the key'
+
   Write-Host ""
   $colour = if ($script:Fail -eq 0) { 'Green' } else { 'Red' }
   Write-Host ("RESULT: " + $script:Pass + " passed, " + $script:Fail + " failed") -ForegroundColor $colour
@@ -2564,3 +2654,4 @@ exit 1
 } finally {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
+

@@ -71,7 +71,7 @@
         'background:var(--surface-glass)', 'backdrop-filter:blur(18px)',
         '-webkit-backdrop-filter:blur(18px)', 'border:1px solid var(--line)',
         'border-radius:var(--radius)', 'box-shadow:var(--shadow)',
-        'overflow:hidden', 'font-family:var(--font)',
+        'overflow:hidden', 'font-family:var(--font)', 'font-size:13px',
       ].join(';'),
     });
 
@@ -90,6 +90,18 @@
         ]),
       ]),
       el('button', {
+        type: 'button', 'aria-label': 'New chat', title: 'Start a new chat', id: 'sentinel-bot-clear',
+        style: 'background:none;border:none;color:var(--text-mute);font-size:12px;cursor:pointer;padding:4px;margin-left:auto;margin-right:2px',
+      }, [document.createTextNode('+ New')]),
+      el('button', {
+        type: 'button', 'aria-label': 'Open Wolf page', title: 'Open the Wolf page (all chats)', id: 'sentinel-bot-open',
+        style: 'background:none;border:none;color:var(--text-mute);font-size:12px;cursor:pointer;padding:4px;margin-right:2px',
+      }, [document.createTextNode('All chats')]),
+      el('button', {
+        type: 'button', 'aria-label': 'Expand', title: 'Full screen', id: 'sentinel-bot-expand',
+        style: 'background:none;border:none;color:var(--text-mute);font-size:16px;line-height:1;cursor:pointer;padding:4px;margin-right:4px',
+      }, [document.createTextNode('\u2922')]),
+      el('button', {
         type: 'button', 'aria-label': 'Close', title: 'Close',
         style: [
           'background:none', 'border:none', 'color:var(--text-mute)',
@@ -98,14 +110,38 @@
         onclick: '',
       }, [document.createTextNode('×')]),
     ]);
-    header.querySelector('button').addEventListener('click', function () { setOpen(false); });
+    var expandBtn = header.querySelector('#sentinel-bot-expand');
+    header.querySelector('#sentinel-bot-clear').addEventListener('click', function () { S.wolf.newChat(); });
+    header.querySelector('#sentinel-bot-open').addEventListener('click', function () { setOpen(false); window.location.hash = '#/wolf'; });
+    header.querySelector('button[aria-label="Close"]').addEventListener('click', function () { setOpen(false); });
+    var big = false;
+    function setBig(next) {
+      big = next;
+      if (big) {
+        panel.style.width = 'min(1000px, calc(100vw - 32px))';
+        panel.style.height = 'calc(100vh - 32px)';
+        panel.style.maxHeight = 'calc(100vh - 32px)';
+        panel.style.bottom = '16px'; panel.style.right = '16px';
+        panel.style.fontSize = '15px';
+        expandBtn.textContent = '\u2921'; expandBtn.title = 'Shrink';
+      } else {
+        panel.style.width = '340px'; panel.style.height = '440px';
+        panel.style.maxHeight = 'calc(100vh - 120px)';
+        panel.style.bottom = '90px'; panel.style.right = '24px';
+        panel.style.fontSize = '13px';
+        expandBtn.textContent = '\u2922'; expandBtn.title = 'Full screen';
+      }
+      try { window.localStorage.setItem('wolf-big', big ? '1' : '0'); } catch (e) { }
+    }
+    expandBtn.addEventListener('click', function () { setBig(!big); });
+    try { if (window.localStorage.getItem('wolf-big') === '1') { setBig(true); } } catch (e) { }
 
     var chat = el('div', {
       class: 'sentinel-bot-chat', 'aria-live': 'polite',
       style: [
         'flex:1', 'overflow-y:auto', 'padding:12px 12px 4px',
         'display:flex', 'flex-direction:column', 'gap:8px',
-        'background:transparent', 'font-size:13px', 'color:var(--text)',
+        'background:transparent', 'font-size:inherit', 'color:var(--text)',
       ].join(';'),
     });
 
@@ -116,7 +152,7 @@
       ].join(';'),
     });
     var input = el('input', {
-      type: 'text', placeholder: 'Ask about alerts, rules, chains...',
+      type: 'text', placeholder: S.wolf.placeholder,
       style: [
         'flex:1', 'min-width:0', 'padding:8px 10px', 'border-radius:var(--radius-sm)',
         'border:1px solid var(--line-2)', 'background:var(--bg-2)', 'color:var(--text)',
@@ -146,6 +182,14 @@
     document.body.appendChild(badge);
     document.body.appendChild(panel);
 
+    function syncRoute() {
+      var onPage = (window.location.hash === '#/wolf');
+      toggle.style.display = onPage ? 'none' : 'flex';
+      if (onPage) { setOpen(false); badge.style.display = 'none'; }
+    }
+    window.addEventListener('hashchange', syncRoute);
+    syncRoute();
+
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && panelOpen) { setOpen(false); }
     });
@@ -162,13 +206,12 @@
       panel.style.display = next ? 'flex' : 'none';
       if (next) {
         badge.style.display = 'none';
-        if (!chat.childNodes.length) { greet(); }
         input.focus();
       }
     }
 
     function greet() {
-      appendBubble('bot', "I'm Wolf, your AD sentinel assistant. Ask me about active alerts, detection coverage, rule status, or attack chains.");
+      appendBubble('bot', S.wolf.greeting);
     }
 
     function appendBubble(who, text) {
@@ -176,7 +219,7 @@
       var row = el('div', { style: 'display:flex;' + (isUser ? 'justify-content:flex-end;' : 'justify-content:flex-start;') });
       var bubble = el('div', {
         style: [
-          'max-width:84%', 'padding:8px 10px', 'border-radius:12px',
+          'max-width:84%','font-size:inherit', 'padding:8px 10px', 'border-radius:12px',
           'line-height:1.4', 'white-space:pre-wrap', 'word-break:break-word',
           isUser
             ? 'background:var(--brand);color:#fff;border-bottom-right-radius:3px;'
@@ -210,21 +253,20 @@
     }
 
     function ask(question) {
-      appendBubble('user', question);
-      appendTyping();
-      sending = true;
-      S.api.post('/api/bot/ask', { question: question }, 'bot').then(function (data) {
-        removeTyping();
-        sending = false;
-        if (data && data.answer) { appendBubble('bot', data.answer); }
-        else { appendBubble('bot', "I'm not sure - try asking about alerts, rules, coverage, or attack chains."); }
-        if (!panelOpen) { badge.style.display = 'flex'; }
-      }).catch(function () {
-        removeTyping();
-        sending = false;
-        appendBubble('bot', 'Connection error - try again in a moment.');
-      });
+      S.wolf.ask(question, { onAnswer: function () { if (!panelOpen) { badge.style.display = 'flex'; } } });
     }
+
+    // paint the active chat from the shared store (also reacts to the Wolf page)
+    function paint() {
+      S.ui.clear(chat);
+      var c = S.wolf.active();
+      if (!c.msgs.length) { greet(); }
+      c.msgs.forEach(function (m) { appendBubble(m.who, m.text); });
+      if (S.wolf.isSending()) { appendTyping(); }
+      chat.scrollTop = chat.scrollHeight;
+    }
+    S.wolf.subscribe(paint);
+    paint();
   }
 
   S.pages.bot = { mount: mount };

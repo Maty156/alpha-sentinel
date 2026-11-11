@@ -13,6 +13,7 @@
     '/paths': 'paths',
     '/rules': 'rules',
     '/events': 'events',
+    '/wolf': 'wolf',
     '/reports': 'reports',
     '/settings': 'settings'
   };

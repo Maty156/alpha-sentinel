@@ -12,3 +12,5 @@ sentinel-auth.csv
 # Replay reports (AlphaSentinel -ReplayPath writes <input>.alerts.csv)
 *.alerts.csv
 .github/
+sentinel-gemini.key
+sentinel-ai.json

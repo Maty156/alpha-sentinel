@@ -217,7 +217,7 @@
       // Clear form
       S.ui.clear(form);
     
-      var titleText = hasKey ? 'Gemini API Key (Configured)' : 'Gemini API Key';
+      var titleText = hasKey ? 'AI API Key (Configured)' : 'AI API Key';
       var subtitle = hasKey ? 'A valid key enables AI-powered answers in the Wolf bot assistant.' : 'Add a Gemini API key to enable AI-powered answers in the Wolf bot assistant.';
     
       form.appendChild(S.ui.el('div', { class: 'form-row' }, [
@@ -279,9 +279,51 @@
       }
     }
   
+    var modelBox = S.ui.el('div', { class: 'card-form' });
+    (function () {
+      var prov = S.ui.el('select', { class: 'field', id: 'aiProvider' });
+      [['gemini', 'Google AI Studio (Gemini key)'], ['openai', 'OpenAI-compatible (FreeLLMAPI, OpenRouter, Ollama...)']].forEach(function (p) {
+        var o = S.ui.el('option', { text: p[1] }); o.setAttribute('value', p[0]); prov.appendChild(o);
+      });
+      var base = S.ui.el('input', { class: 'field', type: 'text', id: 'aiBase', placeholder: 'https://your-host/v1', autocomplete: 'off' });
+      var modelSel = S.ui.el('select', { class: 'field', id: 'geminiModel' });
+      var custom = S.ui.el('input', { class: 'field', type: 'text', id: 'geminiModelCustom', autocomplete: 'off', placeholder: 'type a model id', style: 'margin-top:8px;display:none' });
+      var model = { get value() { return modelSel.value === '__custom' ? custom.value : modelSel.value; } };
+      var modelWrap = S.ui.el('div', {}, [modelSel, custom]);
+      modelSel.addEventListener('change', function () { custom.style.display = modelSel.value === '__custom' ? '' : 'none'; });
+      var mmsg = S.ui.el('div', { class: 'form-msg', 'aria-live': 'polite' });
+      var save = S.ui.el('button', { class: 'btn', type: 'button', text: 'Save model' });
+      var baseRow = field('Base URL', base, 'Include /v1 if the service needs it. The key above is sent to this address, so only use a service you trust.');
+      modelBox.appendChild(field('AI provider', prov, 'Use the second option if your key comes from FreeLLMAPI or another OpenAI-style service.'));
+      modelBox.appendChild(baseRow);
+      modelBox.appendChild(field('Model', modelWrap, 'Pick a model, or choose "Other (type it)" to enter any model id. Free-tier example: gemini-3.1-flash-lite.'));
+      modelBox.appendChild(mmsg);
+      modelBox.appendChild(S.ui.el('div', { class: 'form-actions' }, [save]));
+      function sync() { baseRow.style.display = prov.value === 'openai' ? '' : 'none'; }
+      prov.addEventListener('change', sync);
+      function fill() {
+        S.api.get('/api/settings/gemini-model', 'settings-account').then(function (r) {
+          S.ui.clear(modelSel);
+          (r.choices || []).concat(['__custom']).forEach(function (m) {
+            var o = S.ui.el('option', { text: m === '__custom' ? 'Other (type it)...' : m }); o.setAttribute('value', m); modelSel.appendChild(o);
+          });
+          modelSel.value = r.model; custom.style.display = 'none'; prov.value = r.provider || 'gemini'; base.value = r.baseUrl || ''; sync();
+        }).catch(function () { mmsg.textContent = 'Could not load the model list.'; mmsg.className = 'form-msg form-msg-bad'; });
+      }
+      fill();
+      save.addEventListener('click', function () {
+        save.disabled = true; mmsg.textContent = '';
+        S.api.post('/api/settings/gemini-model', { model: model.value.trim(), provider: prov.value, baseUrl: base.value.trim() }, 'settings-account').then(function () {
+          mmsg.textContent = 'Saved. Wolf will use ' + model.value.trim() + '.'; mmsg.className = 'form-msg form-msg-ok';
+          fill();
+        }).catch(function (err) {
+          mmsg.textContent = err && err.message ? err.message : 'Could not save.'; mmsg.className = 'form-msg form-msg-bad';
+        }).then(function () { save.disabled = false; });
+      });
+    })();
     view.appendChild(S.ui.el('div', { class: 'card' }, [
       S.ui.el('div', { class: 'card-head' }, [S.ui.el('h2', { text: 'Wolf Bot AI Assistant' })]),
-      S.ui.el('div', { class: 'card-body' }, [form])
+      S.ui.el('div', { class: 'card-body' }, [form, modelBox])
     ]));
   }
 

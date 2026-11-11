@@ -28,6 +28,7 @@
       return S.ui.el('span', { class: 'badge rule-blind', text: 'BLIND' });
     }
     if (r.auditState === 'ok') { return S.ui.el('span', { class: 'badge rule-ok', text: 'Working' }); }
+    if (r.auditState === 'unsupported') { return S.ui.el('span', { class: 'badge rule-na', text: 'N/A on this OS', title: r.auditDetail || 'not applicable on this OS' }); }
     if (r.auditState === 'n/a') { return S.ui.el('span', { class: 'badge rule-ok', text: 'Working', title: 'not gated by an audit-policy subcategory' }); }
     // unreadable is NOT working: it is unverified, and it must not be counted
     // towards coverage until an elevated run confirms the subcategory is on
@@ -92,7 +93,7 @@
       preflight = out[1];
       c.blind = rules.filter(function (r) { return r.auditState === 'blind'; }).length;
       c.unknown = rules.filter(function (r) { return r.auditState === 'unknown'; }).length;
-      c.working = rules.length - c.blind - c.unknown;
+      c.working = rules.filter(function (r) { return r.auditState !== 'unsupported'; }).length - c.blind - c.unknown;
       paint();
     }).catch(function (err) {
       var view = document.getElementById('view');
