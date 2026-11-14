@@ -44,8 +44,7 @@ powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1          # then ope
 | 5 | Surafel Ketema | CTC-378-26 | Frontend Developer |
 | 6 | Eyorika Kassaye | CTC-6619-26 | Tester |
 
-*A Python port (one codebase for Windows and Linux) is being developed in a separate
-repository.*
+*The Linux and Python edition lives in a separate repository: https://github.com/Maty156/alpha-sentinel-linux-monitor*
 
 ---
 
