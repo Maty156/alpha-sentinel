@@ -31,7 +31,14 @@ powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1          # then ope
 .\tests\run-tests.ps1                                                # run the test suite
 ```
 
-**Video presentation:** [https://drive.google.com/file/d/1wvxiuGmjbVwOv8mue3jKbEQOhVNKsUNy/view?usp=drivesdk]
+**Video presentations** (each team member presents their own contribution):
+
+| Team member | Video |
+|---|---|
+| Matyas Abreham (Team Lead) | [Watch](https://drive.google.com/file/d/1pql3-JQwtKaJQBLpZVIlGo1rbPO8A_a9/view?usp=sharing) |
+| Surafel Ketema | [Watch](https://drive.google.com/file/d/18V6csm8dpqQxKfkVmqzdrMfwt_Z613_I/view?usp=sharing) |
+| Omer Muzemil (Umer) | [Watch](https://drive.google.com/file/d/143rWGEcts4yoHhREwQLdP1QNYCLlSqBY/view?usp=drive_link) |
+| Team member (earlier link) | [Watch](https://drive.google.com/file/d/1wvxiuGmjbVwOv8mue3jKbEQOhVNKsUNy/view?usp=drivesdk) |
 **Testing File(Excel File):** [https://docs.google.com/spreadsheets/d/1DLi4fa9SWrqt1xZim9bCj6HCqaNBx1Ta6_EJaJg0DGU/edit?gid=0#gid=0]
 
 **Team**
