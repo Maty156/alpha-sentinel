@@ -39,6 +39,7 @@ powershell -ExecutionPolicy Bypass -File .\AlphaSentinel.ps1          # then ope
 | Surafel Ketema | [Watch](https://drive.google.com/file/d/18V6csm8dpqQxKfkVmqzdrMfwt_Z613_I/view?usp=sharing) |
 | Omer Muzemil (Umer) | [Watch](https://drive.google.com/file/d/143rWGEcts4yoHhREwQLdP1QNYCLlSqBY/view?usp=drive_link) |
 | Nathnail Wassie (Nati) | [Watch](https://drive.google.com/file/d/1GwK3IsIw8Cb_TRoDXwGN6ZjzEw_OYbtW/view?usp=drive_link) |
+| Eyorika Kassaye | [Watch](https://drive.google.com/file/d/1cM-D_N3tRoHcMu7NMTGCxdQzKFFfiIWT/view?usp=drivesdk) |
 | Team member (earlier link) | [Watch](https://drive.google.com/file/d/1wvxiuGmjbVwOv8mue3jKbEQOhVNKsUNy/view?usp=drivesdk) |
 **Testing File(Excel File):** [https://docs.google.com/spreadsheets/d/1DLi4fa9SWrqt1xZim9bCj6HCqaNBx1Ta6_EJaJg0DGU/edit?gid=0#gid=0]
 
